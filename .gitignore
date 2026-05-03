@@ -21,6 +21,11 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# GitHub Actions
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+
 # TypeScript
 *.tsbuildinfo
 
