@@ -23,7 +23,7 @@ export function makeFaceOptions(zipperCount: 0 | 1 | 2): FaceOptions {
 export const DEFAULT_PATTERN_PARAMETERS: PatternParameters = {
   seamAllowanceMm: 10,
   bagDepthMm: 55,
-  zipperCutoutHeightMm: 12,
+  zipperCutoutHeightMm: 30,
   zipperEndPatchWidthMm: 35,
   zipperEndPatchHeightMm: 28,
   zipperCoverWidthMm: 32,
@@ -34,5 +34,6 @@ export const DEFAULT_PATTERN_PARAMETERS: PatternParameters = {
   gusset: {
     splitMode: 'single-piece',
     angleBreakThresholdDeg: 25,
+    manualBreakSegmentIndices: [],
   },
 };

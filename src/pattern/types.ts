@@ -35,8 +35,9 @@ export type ZipperOptions = {
 };
 
 export type GussetOptions = {
-  splitMode: 'single-piece' | 'one-piece-per-tube';
+  splitMode: 'single-piece' | 'one-piece-per-tube' | 'manual';
   angleBreakThresholdDeg: number;
+  manualBreakSegmentIndices?: number[];
 };
 
 export type PatternPiece = {

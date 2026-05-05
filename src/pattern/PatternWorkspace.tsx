@@ -1,10 +1,10 @@
 import { ArrowLeft, CircleHelp, Download, Move, RotateCcw, Scissors, Settings2, ZoomIn } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, PointerEvent, WheelEvent } from 'react';
-import { makeDefaultZipper } from './defaults';
 import { generatePattern } from './generatePattern';
 import { boundingBox } from './geometry';
 import { layoutPieces } from './layoutPieces';
+import { ensureZipperCount, updateNumber, zipperBottomClearanceValue } from './zipperOptions';
 import type { FaceOptions, PatternAnnotation, PatternParameters, Point, ValidatedBagShape } from './types';
 
 type PatternWorkspaceProps = {
@@ -12,6 +12,7 @@ type PatternWorkspaceProps = {
   parameters: PatternParameters;
   onParametersChange: (parameters: PatternParameters) => void;
   onBackToTrace: () => void;
+  backButtonLabel?: string;
 };
 
 type PatternViewTransform = {
@@ -125,35 +126,6 @@ function pieceStroke(kind: string, pieceId: string): string {
   return '#1f6f5b';
 }
 
-function updateNumber(value: string): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function ensureZipperCount(face: FaceOptions, zipperCount: 0 | 1 | 2): FaceOptions {
-  return {
-    zipperCount,
-    zippers: Array.from(
-      { length: zipperCount },
-      (_, index) => face.zippers[index] ?? makeDefaultZipper(index),
-    ),
-  };
-}
-
-function zipperBottomClearanceValue(
-  zipper: FaceOptions['zippers'][number],
-  shapeHeightMm: number,
-  cutoutHeightMm: number,
-): number {
-  const clearanceFromBottom = zipper.clearanceFromBottomTubeMm;
-
-  if (clearanceFromBottom !== undefined && Number.isFinite(clearanceFromBottom)) {
-    return clearanceFromBottom;
-  }
-
-  return Math.max(0, shapeHeightMm - zipper.distanceFromTopTubeMm - cutoutHeightMm / 2);
-}
-
 function FieldLabel({ children, help }: { children: string; help: string }) {
   return (
     <span className="field-label">
@@ -248,6 +220,7 @@ export function PatternWorkspace({
   parameters,
   onParametersChange,
   onBackToTrace,
+  backButtonLabel = 'Retour au tracé',
 }: PatternWorkspaceProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const panInteractionRef = useRef<PanInteraction | null>(null);
@@ -475,7 +448,7 @@ export function PatternWorkspace({
           </div>
           <button className="secondary-button" type="button" onClick={onBackToTrace}>
             <ArrowLeft size={17} />
-            Retour au tracé
+            {backButtonLabel}
           </button>
           <button className="primary-button" type="button" onClick={exportSvg}>
             <Download size={17} />
@@ -625,6 +598,7 @@ export function PatternWorkspace({
             >
               <option value="single-piece">Une pièce</option>
               <option value="one-piece-per-tube">Une pièce par tube</option>
+              <option value="manual">Manuelle</option>
             </select>
           </label>
           {parameters.gusset.splitMode === 'one-piece-per-tube' ? (
@@ -648,6 +622,12 @@ export function PatternWorkspace({
                 }
               />
             </label>
+          ) : null}
+          {parameters.gusset.splitMode === 'manual' ? (
+            <div className="metric-row">
+              <span>Points de coupe</span>
+              <strong>{parameters.gusset.manualBreakSegmentIndices?.length ?? 0}</strong>
+            </div>
           ) : null}
         </section>
 

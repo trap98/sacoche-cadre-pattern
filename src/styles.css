@@ -305,6 +305,10 @@ button {
   cursor: crosshair;
 }
 
+.editor-svg.is-zip-setup .workspace-hit-area {
+  cursor: grab;
+}
+
 .shape-fill {
   fill: rgba(31, 111, 91, 0.12);
   stroke: none;
@@ -392,8 +396,86 @@ button {
   cursor: grabbing;
 }
 
+.point-node.locked {
+  cursor: default;
+}
+
+.point-node.locked:hover {
+  fill: #ffffff;
+}
+
+.point-node.gusset-selectable {
+  cursor: pointer;
+}
+
+.point-node.gusset-selectable:hover {
+  fill: #f7efe5;
+  stroke: #9a5d1f;
+}
+
+.point-node.gusset-break {
+  fill: #9a5d1f;
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+
+.point-node.gusset-break:hover {
+  fill: #7b4714;
+}
+
 .point-node.close-ready {
   stroke: #d8762a;
+}
+
+.zip-previews {
+  pointer-events: none;
+}
+
+.zip-preview.faceA {
+  color: #2563a8;
+}
+
+.zip-preview.faceB {
+  color: #26734d;
+}
+
+.zip-preview-cutout {
+  stroke: currentColor;
+  opacity: 0.16;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.zip-preview-axis {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.zip-preview.faceB .zip-preview-axis {
+  stroke-dasharray: 7 5;
+}
+
+.zip-preview-label {
+  fill: currentColor;
+  stroke: #ffffff;
+  paint-order: stroke fill;
+  font-weight: 800;
+  letter-spacing: 0;
+  pointer-events: none;
+}
+
+.zip-preview-hit-area {
+  stroke: transparent;
+  stroke-width: 24;
+  stroke-linecap: round;
+  cursor: ns-resize;
+  pointer-events: all;
+}
+
+.zip-preview-hit-area:hover {
+  stroke: rgba(216, 118, 42, 0.24);
 }
 
 .scene-overlay {

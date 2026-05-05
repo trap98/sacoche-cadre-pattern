@@ -324,6 +324,18 @@ describe('gusset generation', () => {
     expect(boundingBox(pieces[1].paths[0])).toMatchObject({ width: 80, height: 50 });
   });
 
+  it('generates manual gusset sections between selected trace points', () => {
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      { splitMode: 'manual', angleBreakThresholdDeg: 25, manualBreakSegmentIndices: [0, 2] },
+      testParameters({ bagDepthMm: 50 }),
+    );
+
+    expect(pieces).toHaveLength(2);
+    expect(boundingBox(pieces[0].paths[0])).toMatchObject({ width: 180, height: 50 });
+    expect(boundingBox(pieces[1].paths[0])).toMatchObject({ width: 180, height: 50 });
+  });
+
   it('merges small angle changes into one gusset section for curved tubes', () => {
     const pieces = generateGussetPieces(
       curvedTubeShape,

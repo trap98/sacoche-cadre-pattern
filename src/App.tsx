@@ -11,6 +11,8 @@ import {
 } from 'react';
 import {
   AlignHorizontalSpaceAround,
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   CirclePlus,
   Crosshair,
@@ -22,6 +24,8 @@ import {
   Redo2,
   RotateCcw,
   Ruler,
+  Scissors,
+  Settings2,
   Trash2,
   Undo2,
   ZoomIn,
@@ -46,9 +50,16 @@ import {
   HYDRATION_BLADDER_TEMPLATES,
 } from './overlays/hydrationBladders';
 import { DEFAULT_PATTERN_PARAMETERS } from './pattern/defaults';
+import { horizontalLineIntersections } from './pattern/geometry';
 import { PatternWorkspace } from './pattern/PatternWorkspace';
 import { createValidatedBagShape } from './pattern/shape';
-import type { PatternParameters, ValidatedBagShape } from './pattern/types';
+import {
+  ensureZipperCount,
+  resolveZipperDistanceFromTopMm,
+  updateNumber,
+  zipperBottomClearanceValue,
+} from './pattern/zipperOptions';
+import type { FaceOptions, PatternParameters, ValidatedBagShape } from './pattern/types';
 import type { Point, SceneImage, SceneOverlay, SegmentSelection, ViewTransform } from './types';
 
 type Interaction =
@@ -77,6 +88,14 @@ type Interaction =
       startScene: SceneSnapshot;
       historyRecorded: boolean;
       moved: boolean;
+    }
+  | {
+      kind: 'zip';
+      pointerId: number;
+      faceKey: FaceKey;
+      zipperIndex: number;
+      startScreen: Point;
+      moved: boolean;
     };
 
 type ContextMenuState =
@@ -101,7 +120,19 @@ type SceneSnapshot = {
   isClosed: boolean;
 };
 
-type AppMode = 'trace' | 'pattern';
+type AppMode = 'trace' | 'zip-setup' | 'pattern';
+
+type FaceKey = 'faceA' | 'faceB';
+
+type ZipPreview = {
+  faceKey: FaceKey;
+  zipperIndex: number;
+  y: number;
+  x1: number;
+  x2: number;
+  label: string;
+  valueMm: number;
+};
 
 const INITIAL_VIEW: ViewTransform = {
   offsetX: 80,
@@ -151,6 +182,36 @@ function pointBounds(points: Point[]) {
       maxY: Number.NEGATIVE_INFINITY,
     },
   );
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function widestHorizontalSpan(intersections: number[]): { x1: number; x2: number } | null {
+  if (intersections.length < 2) {
+    return null;
+  }
+
+  let widest = {
+    x1: intersections[0],
+    x2: intersections[1],
+  };
+
+  for (let index = 2; index < intersections.length; index += 2) {
+    const x1 = intersections[index];
+    const x2 = intersections[index + 1];
+
+    if (x2 === undefined) {
+      break;
+    }
+
+    if (x2 - x1 > widest.x2 - widest.x1) {
+      widest = { x1, x2 };
+    }
+  }
+
+  return widest;
 }
 
 function pointCentroid(points: Point[]): Point {
@@ -325,6 +386,64 @@ export default function App() {
   const dimensionFontSize = 12 / view.scale;
   const dimensionTextStroke = 4 / view.scale;
   const segmentDimensionOffset = 18 / view.scale;
+  const traceHeightMm = traceBounds ? (traceBounds.maxY - traceBounds.minY) * mmPerUnit : 0;
+  const manualGussetBreaks = patternParameters.gusset.manualBreakSegmentIndices ?? [];
+  const manualGussetBreakSet = useMemo(
+    () => new Set(manualGussetBreaks),
+    [manualGussetBreaks],
+  );
+  const isManualGussetSetup =
+    mode === 'zip-setup' && patternParameters.gusset.splitMode === 'manual';
+  const zipPreviews = useMemo(() => {
+    if (mode !== 'zip-setup' || !isClosed || !traceBounds) {
+      return [];
+    }
+
+    const previews: ZipPreview[] = [];
+    const cutoutHeightMm = patternParameters.zipperCutoutHeightMm;
+
+    (['faceA', 'faceB'] as const).forEach((faceKey) => {
+      const face = patternParameters[faceKey];
+
+      face.zippers.slice(0, face.zipperCount).forEach((zipper, zipperIndex) => {
+        const distanceFromTopMm = resolveZipperDistanceFromTopMm(
+          zipper,
+          zipperIndex,
+          traceHeightMm,
+          cutoutHeightMm,
+        );
+        const y = traceBounds.minY + distanceFromTopMm / mmPerUnit;
+        const span = widestHorizontalSpan(horizontalLineIntersections(points, y));
+
+        if (!span) {
+          return;
+        }
+
+        previews.push({
+          faceKey,
+          zipperIndex,
+          y,
+          x1: span.x1,
+          x2: span.x2,
+          label: `${faceKey === 'faceA' ? 'Face A' : 'Face B'} zip ${zipperIndex + 1}`,
+          valueMm:
+            zipperIndex === 1
+              ? zipperBottomClearanceValue(zipper, traceHeightMm, cutoutHeightMm)
+              : distanceFromTopMm,
+        });
+      });
+    });
+
+    return previews;
+  }, [
+    isClosed,
+    mmPerUnit,
+    mode,
+    patternParameters,
+    points,
+    traceBounds,
+    traceHeightMm,
+  ]);
 
   function getScreenPoint(event: { clientX: number; clientY: number }): Point {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -460,6 +579,62 @@ export default function App() {
     setStatus('Forme retournée en miroir.');
   }
 
+  function updatePatternParameters(patch: Partial<PatternParameters>) {
+    setPatternParameters((current) => ({ ...current, ...patch }));
+  }
+
+  function updateFace(faceKey: FaceKey, updater: (face: FaceOptions) => FaceOptions) {
+    setPatternParameters((current) => ({
+      ...current,
+      [faceKey]: updater(current[faceKey]),
+    }));
+  }
+
+  function handleFaceZipCount(faceKey: FaceKey, event: ChangeEvent<HTMLSelectElement>) {
+    const zipperCount = Number(event.target.value) as 0 | 1 | 2;
+    updateFace(faceKey, (face) => ensureZipperCount(face, zipperCount));
+    setStatus('Configuration zip mise à jour.');
+  }
+
+  function updateZipperFromWorldY(faceKey: FaceKey, zipperIndex: number, worldY: number) {
+    if (!traceBounds) {
+      return;
+    }
+
+    const halfCutoutMm = patternParameters.zipperCutoutHeightMm / 2;
+    const minDistanceMm = halfCutoutMm;
+    const maxDistanceMm = Math.max(minDistanceMm, traceHeightMm - halfCutoutMm);
+    const distanceFromTopMm = clamp(
+      (worldY - traceBounds.minY) * mmPerUnit,
+      minDistanceMm,
+      maxDistanceMm,
+    );
+
+    updateFace(faceKey, (face) => ({
+      ...face,
+      zippers: face.zippers.map((zipper, index) => {
+        if (index !== zipperIndex) {
+          return zipper;
+        }
+
+        if (zipperIndex === 1) {
+          return {
+            ...zipper,
+            clearanceFromBottomTubeMm: Math.max(
+              0,
+              traceHeightMm - distanceFromTopMm - halfCutoutMm,
+            ),
+          };
+        }
+
+        return {
+          ...zipper,
+          distanceFromTopTubeMm: distanceFromTopMm,
+        };
+      }),
+    }));
+  }
+
   function handleWorkspacePointerDown(event: PointerEvent<SVGSVGElement>) {
     if (event.button !== 0 && event.button !== 2) {
       return;
@@ -472,7 +647,7 @@ export default function App() {
       pointerId: event.pointerId,
       startScreen,
       startView: view,
-      addsPointOnClick: event.button === 0,
+      addsPointOnClick: mode === 'trace' && event.button === 0,
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -504,6 +679,35 @@ export default function App() {
     svgRef.current?.setPointerCapture(event.pointerId);
   }
 
+  function handleGussetBreakPointerDown(index: number, event: PointerEvent<SVGCircleElement>) {
+    event.stopPropagation();
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    setContextMenu(null);
+    setSelectedSegment(null);
+    setSelectedOverlayId(null);
+    setPatternParameters((current) => {
+      const currentBreaks = current.gusset.manualBreakSegmentIndices ?? [];
+      const hasBreak = currentBreaks.includes(index);
+      const nextBreaks = hasBreak
+        ? currentBreaks.filter((breakIndex) => breakIndex !== index)
+        : [...currentBreaks, index].sort((a, b) => a - b);
+
+      return {
+        ...current,
+        gusset: {
+          ...current.gusset,
+          splitMode: 'manual',
+          manualBreakSegmentIndices: nextBreaks,
+        },
+      };
+    });
+    setStatus('Point de coupe du soufflet mis à jour.');
+  }
+
   function handleOverlayPointerDown(id: string, event: PointerEvent<SVGGElement>) {
     event.stopPropagation();
 
@@ -527,12 +731,37 @@ export default function App() {
     svgRef.current?.setPointerCapture(event.pointerId);
   }
 
+  function handleZipPointerDown(
+    faceKey: FaceKey,
+    zipperIndex: number,
+    event: PointerEvent<SVGLineElement>,
+  ) {
+    event.stopPropagation();
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    setContextMenu(null);
+    setSelectedSegment(null);
+    setSelectedOverlayId(null);
+    interactionRef.current = {
+      kind: 'zip',
+      pointerId: event.pointerId,
+      faceKey,
+      zipperIndex,
+      startScreen: getScreenPoint(event),
+      moved: false,
+    };
+    svgRef.current?.setPointerCapture(event.pointerId);
+  }
+
   function handlePointerMove(event: PointerEvent<SVGSVGElement>) {
     const interaction = interactionRef.current;
     const screenPoint = getScreenPoint(event);
 
     if (!interaction) {
-      if (!isClosed && points.length > 0) {
+      if (mode === 'trace' && !isClosed && points.length > 0) {
         setPreviewPoint(screenToWorld(screenPoint, view));
       }
 
@@ -590,6 +819,12 @@ export default function App() {
       return;
     }
 
+    if (interaction.kind === 'zip') {
+      interactionRef.current = { ...interaction, moved: interaction.moved || moved };
+      updateZipperFromWorldY(interaction.faceKey, interaction.zipperIndex, screenToWorld(screenPoint, view).y);
+      return;
+    }
+
     interactionRef.current = { ...interaction, moved: interaction.moved || moved };
     if (moved && !interaction.historyRecorded) {
       pushHistorySnapshot(interaction.startScene);
@@ -623,6 +858,10 @@ export default function App() {
 
     if (interaction.kind === 'point' && !interaction.moved && interaction.index === 0 && !isClosed) {
       closeShape();
+    }
+
+    if (interaction.kind === 'zip' && interaction.moved) {
+      setStatus('Hauteur de zip ajustée.');
     }
   }
 
@@ -831,8 +1070,12 @@ export default function App() {
       const shape = createValidatedBagShape(points, isClosed, mmPerUnit);
 
       setValidatedShape(shape);
-      setMode('pattern');
-      setStatus('Tracé validé. Les pièces de patronnage sont générées.');
+      setMode('zip-setup');
+      setSelectedSegment(null);
+      setLengthInput('');
+      setContextMenu(null);
+      setPreviewPoint(null);
+      setStatus('Tracé validé. Configurez les zips sur la photo avant de générer le patron.');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Impossible de valider le tracé.');
     }
@@ -843,13 +1086,91 @@ export default function App() {
     setStatus('Retour au tracé. Modifiez la forme puis validez à nouveau.');
   }
 
+  function returnToZipSetup() {
+    setMode('zip-setup');
+    setStatus('Retour à la configuration des zips.');
+  }
+
+  function generatePatternStep() {
+    try {
+      const shape = createValidatedBagShape(points, isClosed, mmPerUnit);
+
+      setValidatedShape(shape);
+      setMode('pattern');
+      setStatus('Les pièces de patronnage sont générées.');
+    } catch (error) {
+      setMode('trace');
+      setStatus(error instanceof Error ? error.message : 'Impossible de générer le patron.');
+    }
+  }
+
+  function renderZipSetupFaceControls(faceKey: FaceKey, label: string) {
+    const face = patternParameters[faceKey];
+
+    return (
+      <section className="tool-section">
+        <div className="section-title">{label}</div>
+        <label className="field">
+          <span>Nombre de zips</span>
+          <select value={face.zipperCount} onChange={(event) => handleFaceZipCount(faceKey, event)}>
+            <option value={0}>0 zip</option>
+            <option value={1}>1 zip</option>
+            <option value={2}>2 zips</option>
+          </select>
+        </label>
+
+        {face.zippers.slice(0, face.zipperCount).map((zipper, index) => {
+          const usesBottomReference = index === 1;
+          const inputValue = usesBottomReference
+            ? zipperBottomClearanceValue(
+                zipper,
+                traceHeightMm,
+                patternParameters.zipperCutoutHeightMm,
+              )
+            : zipper.distanceFromTopTubeMm;
+          const labelText = usesBottomReference
+            ? 'Hauteur utile sous zip 2'
+            : `Hauteur zip ${index + 1} depuis top tube`;
+
+          return (
+            <label className="field" key={zipper.id}>
+              <span>{labelText}</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={Math.round(inputValue * 10) / 10}
+                onChange={(event) =>
+                  updateFace(faceKey, (currentFace) => ({
+                    ...currentFace,
+                    zippers: currentFace.zippers.map((currentZipper, zipperIndex) =>
+                      zipperIndex === index
+                        ? {
+                            ...currentZipper,
+                            ...(usesBottomReference
+                              ? { clearanceFromBottomTubeMm: updateNumber(event.target.value) }
+                              : { distanceFromTopTubeMm: updateNumber(event.target.value) }),
+                          }
+                        : currentZipper,
+                    ),
+                  }))
+                }
+              />
+            </label>
+          );
+        })}
+      </section>
+    );
+  }
+
   if (mode === 'pattern' && validatedShape) {
     return (
       <PatternWorkspace
         shape={validatedShape}
         parameters={patternParameters}
         onParametersChange={setPatternParameters}
-        onBackToTrace={returnToTrace}
+        onBackToTrace={returnToZipSetup}
+        backButtonLabel="Retour aux zips"
       />
     );
   }
@@ -858,10 +1179,10 @@ export default function App() {
     <main className="app-shell">
       <aside className="tool-panel" aria-label="Outils">
         <div className="brand-block">
-          <Crosshair size={22} />
+          {mode === 'zip-setup' ? <Scissors size={22} /> : <Crosshair size={22} />}
           <div>
             <h1>Cadre Pattern</h1>
-            <p>POC tracé sacoche</p>
+            <p>{mode === 'zip-setup' ? 'Configuration patronnage' : 'POC tracé sacoche'}</p>
           </div>
         </div>
 
@@ -898,7 +1219,7 @@ export default function App() {
         </section>
 
         <section className="tool-section">
-          <div className="section-title">Tracé</div>
+          <div className="section-title">{mode === 'zip-setup' ? 'Tracé validé' : 'Tracé'}</div>
           <div className="metric-row">
             <span>Points</span>
             <strong>{points.length}</strong>
@@ -907,47 +1228,66 @@ export default function App() {
             <span>État</span>
             <strong>{isClosed ? 'Fermé' : 'Ouvert'}</strong>
           </div>
-          <label className="checkbox-field">
-            <input
-              type="checkbox"
-              checked={showTraceDimensions}
-              onChange={(event) => setShowTraceDimensions(event.target.checked)}
-            />
-            Afficher dimensions
-          </label>
-          <div className="button-row">
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={undo}
-              disabled={historyPast.length === 0}
-            >
-              <Undo2 size={17} />
-              Retour
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={redo}
-              disabled={historyFuture.length === 0}
-            >
-              <Redo2 size={17} />
-              Suivant
-            </button>
-          </div>
-          <button className="secondary-button" type="button" onClick={clearTrace} disabled={points.length === 0}>
-            <RotateCcw size={17} />
-            Réinitialiser
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={validateTrace}
-            disabled={!isClosed || points.length < 3}
-          >
-            <CheckCircle2 size={18} />
-            Valider le tracé
-          </button>
+          {mode === 'zip-setup' ? (
+            <>
+              <div className="metric-row">
+                <span>Hauteur</span>
+                <strong>{formatMm(traceHeightMm)} mm</strong>
+              </div>
+              <button className="secondary-button" type="button" onClick={returnToTrace}>
+                <ArrowLeft size={17} />
+                Retour au tracé
+              </button>
+              <button className="primary-button" type="button" onClick={generatePatternStep}>
+                <ArrowRight size={18} />
+                Générer patron
+              </button>
+            </>
+          ) : (
+            <>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={showTraceDimensions}
+                  onChange={(event) => setShowTraceDimensions(event.target.checked)}
+                />
+                Afficher dimensions
+              </label>
+              <div className="button-row">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={undo}
+                  disabled={historyPast.length === 0}
+                >
+                  <Undo2 size={17} />
+                  Retour
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={redo}
+                  disabled={historyFuture.length === 0}
+                >
+                  <Redo2 size={17} />
+                  Suivant
+                </button>
+              </div>
+              <button className="secondary-button" type="button" onClick={clearTrace} disabled={points.length === 0}>
+                <RotateCcw size={17} />
+                Réinitialiser
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={validateTrace}
+                disabled={!isClosed || points.length < 3}
+              >
+                <CheckCircle2 size={18} />
+                Valider le tracé
+              </button>
+            </>
+          )}
         </section>
 
         <section className="tool-section">
@@ -957,21 +1297,36 @@ export default function App() {
             Reset vue
           </button>
           <div className="hint-list">
-            <span>
-              <MousePointer2 size={15} /> Clic fond : point
-            </span>
-            <span>
-              <MousePointer2 size={15} /> Alt + clic point : supprimer
-            </span>
-            <span>
-              <MousePointer2 size={15} /> Clic droit : menu
-            </span>
-            <span>
-              <MousePointer2 size={15} /> Ctrl+Z / Ctrl+Shift+Z
-            </span>
-            <span>
-              <MousePointer2 size={15} /> Double-clic segment : insérer
-            </span>
+            {mode === 'trace' ? (
+              <>
+                <span>
+                  <MousePointer2 size={15} /> Clic fond : point
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Alt + clic point : supprimer
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Clic droit : menu
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Ctrl+Z / Ctrl+Shift+Z
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Double-clic segment : insérer
+                </span>
+              </>
+            ) : (
+              <>
+                <span>
+                  <MousePointer2 size={15} /> Glisser une ligne zip : hauteur
+                </span>
+                {isManualGussetSetup ? (
+                  <span>
+                    <MousePointer2 size={15} /> Clic point : coupe soufflet
+                  </span>
+                ) : null}
+              </>
+            )}
             <span>
               <Move size={15} /> Glisser fond : pan
             </span>
@@ -981,43 +1336,136 @@ export default function App() {
           </div>
         </section>
 
-        <section className="tool-section">
-          <div className="section-title">Calibration</div>
-          {selectedSegmentPoints && currentSelectedLengthMm !== null ? (
-            <form className="calibration-form" onSubmit={applyCalibration}>
-              <div className="metric-row">
-                <span>Segment</span>
-                <strong>
-                  {selectedSegmentPoints.start + 1}-{selectedSegmentPoints.end + 1}
-                </strong>
-              </div>
-              <div className="metric-row">
-                <span>Longueur</span>
-                <strong>{formatMm(currentSelectedLengthMm)} mm</strong>
-              </div>
+        {mode === 'trace' ? (
+          <section className="tool-section">
+            <div className="section-title">Calibration</div>
+            {selectedSegmentPoints && currentSelectedLengthMm !== null ? (
+              <form className="calibration-form" onSubmit={applyCalibration}>
+                <div className="metric-row">
+                  <span>Segment</span>
+                  <strong>
+                    {selectedSegmentPoints.start + 1}-{selectedSegmentPoints.end + 1}
+                  </strong>
+                </div>
+                <div className="metric-row">
+                  <span>Longueur</span>
+                  <strong>{formatMm(currentSelectedLengthMm)} mm</strong>
+                </div>
+                <label className="field">
+                  <span>Longueur réelle</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.1"
+                    value={lengthInput}
+                    onChange={(event) => setLengthInput(event.target.value)}
+                  />
+                </label>
+                <button className="primary-button" type="submit">
+                  <Ruler size={18} />
+                  Appliquer
+                </button>
+                <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
+                  <AlignHorizontalSpaceAround size={18} />
+                  Remettre droit
+                </button>
+              </form>
+            ) : (
+              <p className="empty-state">Sélectionnez un segment du tracé pour saisir sa longueur en mm.</p>
+            )}
+          </section>
+        ) : null}
+
+        {mode === 'zip-setup' ? (
+          <>
+            <section className="tool-section">
+              <div className="section-title">Découpe zip</div>
               <label className="field">
-                <span>Longueur réelle</span>
+                <span>Hauteur découpe zip</span>
                 <input
                   type="number"
-                  min="1"
-                  step="0.1"
-                  value={lengthInput}
-                  onChange={(event) => setLengthInput(event.target.value)}
+                  min="0"
+                  step="1"
+                  value={patternParameters.zipperCutoutHeightMm}
+                  onChange={(event) =>
+                    updatePatternParameters({ zipperCutoutHeightMm: updateNumber(event.target.value) })
+                  }
                 />
               </label>
-              <button className="primary-button" type="submit">
-                <Ruler size={18} />
-                Appliquer
-              </button>
-              <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
-                <AlignHorizontalSpaceAround size={18} />
-                Remettre droit
-              </button>
-            </form>
-          ) : (
-            <p className="empty-state">Sélectionnez un segment du tracé pour saisir sa longueur en mm.</p>
-          )}
-        </section>
+            </section>
+            {renderZipSetupFaceControls('faceA', 'Face A')}
+            {renderZipSetupFaceControls('faceB', 'Face B')}
+            <section className="tool-section">
+              <div className="section-title">Soufflet</div>
+              <label className="field">
+                <span>Découpe</span>
+                <select
+                  value={patternParameters.gusset.splitMode}
+                  onChange={(event) =>
+                    setPatternParameters((current) => ({
+                      ...current,
+                      gusset: {
+                        ...current.gusset,
+                        splitMode: event.target.value as PatternParameters['gusset']['splitMode'],
+                      },
+                    }))
+                  }
+                >
+                  <option value="single-piece">Une pièce</option>
+                  <option value="one-piece-per-tube">Une pièce par tube</option>
+                  <option value="manual">Manuelle</option>
+                </select>
+              </label>
+              {patternParameters.gusset.splitMode === 'one-piece-per-tube' ? (
+                <label className="field">
+                  <span>Angle changement pièce</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    step="1"
+                    value={patternParameters.gusset.angleBreakThresholdDeg}
+                    onChange={(event) =>
+                      setPatternParameters((current) => ({
+                        ...current,
+                        gusset: {
+                          ...current.gusset,
+                          angleBreakThresholdDeg: updateNumber(event.target.value),
+                        },
+                      }))
+                    }
+                  />
+                </label>
+              ) : null}
+              {patternParameters.gusset.splitMode === 'manual' ? (
+                <>
+                  <div className="metric-row">
+                    <span>Points de coupe</span>
+                    <strong>{manualGussetBreaks.length}</strong>
+                  </div>
+                  <p className="empty-state">Cliquez sur les points du tracé où le soufflet doit être coupé.</p>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() =>
+                      setPatternParameters((current) => ({
+                        ...current,
+                        gusset: {
+                          ...current.gusset,
+                          manualBreakSegmentIndices: [],
+                        },
+                      }))
+                    }
+                    disabled={manualGussetBreaks.length === 0}
+                  >
+                    <Trash2 size={17} />
+                    Réinitialiser coupes
+                  </button>
+                </>
+              ) : null}
+            </section>
+          </>
+        ) : null}
 
         <section className="tool-section">
           <div className="section-title">Formes test</div>
@@ -1094,13 +1542,16 @@ export default function App() {
           )}
         </section>
 
-        <div className="status-line">{status}</div>
+        <div className="status-line">
+          {mode === 'zip-setup' ? <Settings2 size={15} /> : null}
+          {status}
+        </div>
       </aside>
 
       <section className="workspace">
         <svg
           ref={svgRef}
-          className="editor-svg"
+          className={mode === 'zip-setup' ? 'editor-svg is-zip-setup' : 'editor-svg'}
           onPointerDown={handleWorkspacePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -1385,7 +1836,65 @@ export default function App() {
               </g>
             ) : null}
 
-            {Array.from({ length: segmentCount }, (_, index) => {
+            {zipPreviews.length > 0 ? (
+              <g className="zip-previews">
+                {zipPreviews.map((preview) => {
+                  const labelOffset = (preview.faceKey === 'faceA' ? -14 : 16) / view.scale;
+                  const cutoutHeight = Math.max(
+                    patternParameters.zipperCutoutHeightMm / mmPerUnit,
+                    1 / view.scale,
+                  );
+
+                  return (
+                    <g
+                      className={`zip-preview ${preview.faceKey}`}
+                      key={`${preview.faceKey}-${preview.zipperIndex}`}
+                    >
+                      <line
+                        className="zip-preview-cutout"
+                        x1={preview.x1}
+                        y1={preview.y}
+                        x2={preview.x2}
+                        y2={preview.y}
+                        strokeWidth={cutoutHeight}
+                      />
+                      <line
+                        className="zip-preview-axis"
+                        x1={preview.x1}
+                        y1={preview.y}
+                        x2={preview.x2}
+                        y2={preview.y}
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <text
+                        className="zip-preview-label"
+                        x={(preview.x1 + preview.x2) / 2}
+                        y={preview.y + labelOffset}
+                        fontSize={12 / view.scale}
+                        strokeWidth={4 / view.scale}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                      >
+                        {preview.label} - {formatMm(preview.valueMm)} mm
+                      </text>
+                      <line
+                        className="zip-preview-hit-area"
+                        x1={preview.x1}
+                        y1={preview.y}
+                        x2={preview.x2}
+                        y2={preview.y}
+                        vectorEffect="non-scaling-stroke"
+                        onPointerDown={(event) =>
+                          handleZipPointerDown(preview.faceKey, preview.zipperIndex, event)
+                        }
+                      />
+                    </g>
+                  );
+                })}
+              </g>
+            ) : null}
+
+            {mode === 'trace' ? Array.from({ length: segmentCount }, (_, index) => {
               const endIndex = segmentEndIndex(index, points.length, isClosed);
               const a = points[index];
               const b = points[endIndex];
@@ -1405,7 +1914,7 @@ export default function App() {
                   onContextMenu={(event) => openSegmentContextMenu(index, event)}
                 />
               );
-            })}
+            }) : null}
 
             {!isClosed && points.length > 0 && previewPoint ? (
               <line
@@ -1421,13 +1930,26 @@ export default function App() {
             {points.map((point, index) => (
               <circle
                 key={`${point.x}-${point.y}-${index}`}
-                className={index === 0 && !isClosed && points.length >= 3 ? 'point-node close-ready' : 'point-node'}
+                className={[
+                  index === 0 && !isClosed && points.length >= 3 ? 'point-node close-ready' : 'point-node',
+                  mode === 'zip-setup' ? 'locked' : '',
+                  isManualGussetSetup ? 'gusset-selectable' : '',
+                  manualGussetBreakSet.has(index) ? 'gusset-break' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 cx={point.x}
                 cy={point.y}
                 r={pointNodeRadius}
                 vectorEffect="non-scaling-stroke"
-                onPointerDown={(event) => handlePointPointerDown(index, event)}
-                onContextMenu={(event) => openPointContextMenu(index, event)}
+                onPointerDown={
+                  mode === 'trace'
+                    ? (event) => handlePointPointerDown(index, event)
+                    : isManualGussetSetup
+                      ? (event) => handleGussetBreakPointerDown(index, event)
+                      : undefined
+                }
+                onContextMenu={mode === 'trace' ? (event) => openPointContextMenu(index, event) : undefined}
               />
             ))}
           </g>

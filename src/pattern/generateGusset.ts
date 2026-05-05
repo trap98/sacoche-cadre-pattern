@@ -116,6 +116,58 @@ function gussetSectionsByAngle(points: Point[], thresholdDeg: number): GussetSec
   return sections;
 }
 
+function sectionLength(points: Point[], startSegmentIndex: number, segmentCount: number): number {
+  return Array.from({ length: segmentCount }, (_, offset) => {
+    const segmentIndex = (startSegmentIndex + offset) % points.length;
+    return segmentLength(points[segmentIndex], points[(segmentIndex + 1) % points.length]);
+  }).reduce((total, length) => total + length, 0);
+}
+
+function gussetSectionsByManualBreaks(
+  points: Point[],
+  manualBreakSegmentIndices: number[] = [],
+): GussetSection[] {
+  const segmentCount = points.length;
+
+  if (segmentCount === 0) {
+    return [];
+  }
+
+  const breaks = Array.from(
+    new Set(
+      manualBreakSegmentIndices
+        .map((index) => Math.trunc(index))
+        .filter((index) => index >= 0 && index < segmentCount),
+    ),
+  ).sort((a, b) => a - b);
+
+  if (breaks.length <= 1) {
+    const startSegmentIndex = breaks[0] ?? 0;
+
+    return [
+      {
+        startSegmentIndex,
+        segmentCount,
+        length: polygonPerimeter(points),
+      },
+    ];
+  }
+
+  return breaks.map((startSegmentIndex, index) => {
+    const nextBreak = breaks[(index + 1) % breaks.length];
+    const count =
+      nextBreak > startSegmentIndex
+        ? nextBreak - startSegmentIndex
+        : segmentCount - startSegmentIndex + nextBreak;
+
+    return {
+      startSegmentIndex,
+      segmentCount: count,
+      length: sectionLength(points, startSegmentIndex, count),
+    };
+  });
+}
+
 export function generateGussetPieces(
   shape: ValidatedBagShape,
   gusset: GussetOptions,
@@ -133,7 +185,12 @@ export function generateGussetPieces(
     ];
   }
 
-  return gussetSectionsByAngle(shape.outline, gusset.angleBreakThresholdDeg).map((section, index) => {
+  const sections =
+    gusset.splitMode === 'manual'
+      ? gussetSectionsByManualBreaks(shape.outline, gusset.manualBreakSegmentIndices)
+      : gussetSectionsByAngle(shape.outline, gusset.angleBreakThresholdDeg);
+
+  return sections.map((section, index) => {
     return makeGussetPiece(
       `gusset-${index + 1}`,
       section.segmentCount === 1
