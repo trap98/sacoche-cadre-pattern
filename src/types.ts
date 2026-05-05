@@ -18,6 +18,14 @@ export type SceneImage = ImageFrame & {
   rotation: number;
 };
 
+export type SceneOverlay = ImageFrame & {
+  id: string;
+  templateId: string;
+  mirrored: boolean;
+  opacity: number;
+  rotation: number;
+};
+
 export type ViewTransform = {
   offsetX: number;
   offsetY: number;

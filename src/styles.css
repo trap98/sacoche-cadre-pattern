@@ -231,6 +231,11 @@ button {
   gap: 12px;
 }
 
+.overlay-controls {
+  display: grid;
+  gap: 12px;
+}
+
 .empty-state {
   margin: 0;
   color: #69707d;
@@ -316,6 +321,37 @@ button {
   vector-effect: non-scaling-stroke;
 }
 
+.trace-dimensions {
+  pointer-events: none;
+}
+
+.trace-dimension-line {
+  fill: none;
+  stroke: #4d5964;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.trace-dimension-tick {
+  stroke: #4d5964;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.trace-dimension-text {
+  fill: #27313b;
+  stroke: #ffffff;
+  paint-order: stroke fill;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.trace-dimension-text.segment {
+  fill: #4d5964;
+  font-weight: 600;
+}
+
 .preview-line {
   fill: none;
   stroke: #d8762a;
@@ -358,6 +394,61 @@ button {
 
 .point-node.close-ready {
   stroke: #d8762a;
+}
+
+.scene-overlay {
+  cursor: grab;
+}
+
+.scene-overlay:active {
+  cursor: grabbing;
+}
+
+.scene-overlay-hit-area {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+}
+
+.scene-overlay-selection {
+  fill: none;
+  stroke: #d8762a;
+  stroke-width: 1.3;
+  stroke-dasharray: 6 5;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.bladder-path {
+  fill: none;
+  stroke: #4b535f;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.bladder-path.outline {
+  fill: rgba(90, 102, 116, 0.08);
+  stroke: #26313d;
+  stroke-width: 1.6;
+}
+
+.bladder-path.detail,
+.bladder-path.hose {
+  stroke: #7a8491;
+  stroke-width: 0.9;
+}
+
+.bladder-path.fill-cap {
+  fill: rgba(255, 255, 255, 0.72);
+  stroke: #626a76;
+  stroke-width: 1;
+}
+
+.bladder-path.port {
+  stroke: #626a76;
+  stroke-width: 0.95;
 }
 
 .pattern-shell .tool-panel {

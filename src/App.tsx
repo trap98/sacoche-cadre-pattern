@@ -14,6 +14,8 @@ import {
   CheckCircle2,
   CirclePlus,
   Crosshair,
+  Droplets,
+  FlipHorizontal,
   ImagePlus,
   Move,
   MousePointer2,
@@ -39,11 +41,15 @@ import {
   segmentScaleFactorForTargetMm,
   zoomAtScreenPoint,
 } from './geometry';
+import {
+  findBladderTemplate,
+  HYDRATION_BLADDER_TEMPLATES,
+} from './overlays/hydrationBladders';
 import { DEFAULT_PATTERN_PARAMETERS } from './pattern/defaults';
 import { PatternWorkspace } from './pattern/PatternWorkspace';
 import { createValidatedBagShape } from './pattern/shape';
 import type { PatternParameters, ValidatedBagShape } from './pattern/types';
-import type { Point, SceneImage, SegmentSelection, ViewTransform } from './types';
+import type { Point, SceneImage, SceneOverlay, SegmentSelection, ViewTransform } from './types';
 
 type Interaction =
   | {
@@ -58,6 +64,15 @@ type Interaction =
       kind: 'point';
       pointerId: number;
       index: number;
+      startScreen: Point;
+      startScene: SceneSnapshot;
+      historyRecorded: boolean;
+      moved: boolean;
+    }
+  | {
+      kind: 'overlay';
+      pointerId: number;
+      id: string;
       startScreen: Point;
       startScene: SceneSnapshot;
       historyRecorded: boolean;
@@ -81,6 +96,7 @@ type ContextMenuState =
 
 type SceneSnapshot = {
   image: SceneImage | null;
+  overlays: SceneOverlay[];
   points: Point[];
   isClosed: boolean;
 };
@@ -94,6 +110,7 @@ const INITIAL_VIEW: ViewTransform = {
 };
 
 const POINT_NODE_RADIUS_PX = 5;
+const PDF_POINT_TO_MM = 25.4 / 72;
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -119,12 +136,47 @@ function formatMm(value: number): string {
   }).format(value);
 }
 
+function pointBounds(points: Point[]) {
+  return points.reduce(
+    (bounds, point) => ({
+      minX: Math.min(bounds.minX, point.x),
+      minY: Math.min(bounds.minY, point.y),
+      maxX: Math.max(bounds.maxX, point.x),
+      maxY: Math.max(bounds.maxY, point.y),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY,
+    },
+  );
+}
+
+function pointCentroid(points: Point[]): Point {
+  const sum = points.reduce(
+    (current, point) => ({
+      x: current.x + point.x,
+      y: current.y + point.y,
+    }),
+    { x: 0, y: 0 },
+  );
+
+  return {
+    x: sum.x / points.length,
+    y: sum.y / points.length,
+  };
+}
+
 export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const interactionRef = useRef<Interaction | null>(null);
 
   const [image, setImage] = useState<SceneImage | null>(null);
+  const [overlays, setOverlays] = useState<SceneOverlay[]>([]);
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
+  const [overlayTemplateId, setOverlayTemplateId] = useState(HYDRATION_BLADDER_TEMPLATES[0].id);
   const [points, setPoints] = useState<Point[]>([]);
   const [isClosed, setIsClosed] = useState(false);
   const [mode, setMode] = useState<AppMode>('trace');
@@ -136,6 +188,7 @@ export default function App() {
   const [selectedSegment, setSelectedSegment] = useState<SegmentSelection | null>(null);
   const [lengthInput, setLengthInput] = useState('');
   const [mmPerUnit] = useState(DEFAULT_MM_PER_UNIT);
+  const [showTraceDimensions, setShowTraceDimensions] = useState(true);
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [historyPast, setHistoryPast] = useState<SceneSnapshot[]>([]);
@@ -145,14 +198,17 @@ export default function App() {
   const makeSceneSnapshot = useCallback(
     (): SceneSnapshot => ({
       image: image ? { ...image } : null,
+      overlays: overlays.map((overlay) => ({ ...overlay })),
       points: points.map((point) => ({ ...point })),
       isClosed,
     }),
-    [image, isClosed, points],
+    [image, isClosed, overlays, points],
   );
 
   const applySceneSnapshot = useCallback((snapshot: SceneSnapshot) => {
     setImage(snapshot.image ? { ...snapshot.image } : null);
+    setOverlays(snapshot.overlays.map((overlay) => ({ ...overlay })));
+    setSelectedOverlayId(null);
     setPoints(snapshot.points.map((point) => ({ ...point })));
     setIsClosed(snapshot.isClosed);
     setSelectedSegment(null);
@@ -246,11 +302,29 @@ export default function App() {
       b: points[end],
     };
   }, [isClosed, points, selectedSegment]);
+  const selectedOverlay = useMemo(
+    () => overlays.find((overlay) => overlay.id === selectedOverlayId) ?? null,
+    [overlays, selectedOverlayId],
+  );
+  const selectedOverlayTemplate = selectedOverlay
+    ? findBladderTemplate(selectedOverlay.templateId)
+    : null;
   const pointNodeRadius = POINT_NODE_RADIUS_PX / view.scale;
 
   const currentSelectedLengthMm = selectedSegmentPoints
     ? segmentLengthInMm(selectedSegmentPoints.a, selectedSegmentPoints.b, mmPerUnit)
     : null;
+  const traceBounds = useMemo(() => (points.length > 0 ? pointBounds(points) : null), [points]);
+  const traceCentroid = useMemo(
+    () => (points.length > 0 ? pointCentroid(points) : null),
+    [points],
+  );
+  const dimensionOffset = 34 / view.scale;
+  const dimensionTick = 7 / view.scale;
+  const dimensionTextOffset = 14 / view.scale;
+  const dimensionFontSize = 12 / view.scale;
+  const dimensionTextStroke = 4 / view.scale;
+  const segmentDimensionOffset = 18 / view.scale;
 
   function getScreenPoint(event: { clientX: number; clientY: number }): Point {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -274,6 +348,7 @@ export default function App() {
     setPoints((current) => [...current, point]);
     setPreviewPoint(point);
     setSelectedSegment(null);
+    setSelectedOverlayId(null);
     setStatus('Point ajouté. Cliquez sur le premier point pour fermer la forme.');
   }
 
@@ -312,6 +387,77 @@ export default function App() {
     });
     recordHistory();
     setStatus('Photo importée. Ajustez son opacité et tracez la sacoche.');
+  }
+
+  function addOverlay(templateId: string) {
+    const template = findBladderTemplate(templateId);
+
+    if (!template) {
+      return;
+    }
+
+    const rect = svgRef.current?.getBoundingClientRect();
+    const center = rect
+      ? screenToWorld({ x: rect.width / 2, y: rect.height / 2 }, view)
+      : { x: 120, y: 120 };
+    const overlay: SceneOverlay = {
+      id: `${templateId}-${Date.now()}`,
+      templateId,
+      x: center.x - template.widthMm / 2,
+      y: center.y - template.heightMm / 2,
+      width: template.widthMm,
+      height: template.heightMm,
+      mirrored: false,
+      opacity: 0.68,
+      rotation: 0,
+    };
+
+    recordHistory();
+    setOverlays((current) => [...current, overlay]);
+    setSelectedOverlayId(overlay.id);
+    setStatus(`${template.label} ajouté. Glissez la forme pour la déplacer.`);
+  }
+
+  function deleteSelectedOverlay() {
+    if (!selectedOverlay) {
+      return;
+    }
+
+    recordHistory();
+    setOverlays((current) => current.filter((overlay) => overlay.id !== selectedOverlay.id));
+    setSelectedOverlayId(null);
+    setStatus('Forme supprimée.');
+  }
+
+  function updateSelectedOverlay(
+    updates: Partial<Pick<SceneOverlay, 'x' | 'y' | 'rotation' | 'opacity' | 'mirrored'>>,
+  ) {
+    if (!selectedOverlay) {
+      return;
+    }
+
+    setOverlays((current) =>
+      current.map((overlay) =>
+        overlay.id === selectedOverlay.id
+          ? {
+              ...overlay,
+              ...updates,
+            }
+          : overlay,
+      ),
+    );
+  }
+
+  function toggleSelectedOverlayMirror() {
+    if (!selectedOverlay) {
+      return;
+    }
+
+    recordHistory();
+    updateSelectedOverlay({
+      mirrored: !selectedOverlay.mirrored,
+    });
+    setStatus('Forme retournée en miroir.');
   }
 
   function handleWorkspacePointerDown(event: PointerEvent<SVGSVGElement>) {
@@ -358,6 +504,29 @@ export default function App() {
     svgRef.current?.setPointerCapture(event.pointerId);
   }
 
+  function handleOverlayPointerDown(id: string, event: PointerEvent<SVGGElement>) {
+    event.stopPropagation();
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    setContextMenu(null);
+    setSelectedSegment(null);
+    setSelectedOverlayId(id);
+
+    interactionRef.current = {
+      kind: 'overlay',
+      pointerId: event.pointerId,
+      id,
+      startScreen: getScreenPoint(event),
+      startScene: makeSceneSnapshot(),
+      historyRecorded: false,
+      moved: false,
+    };
+    svgRef.current?.setPointerCapture(event.pointerId);
+  }
+
   function handlePointerMove(event: PointerEvent<SVGSVGElement>) {
     const interaction = interactionRef.current;
     const screenPoint = getScreenPoint(event);
@@ -385,6 +554,39 @@ export default function App() {
         offsetX: interaction.startView.offsetX + screenPoint.x - interaction.startScreen.x,
         offsetY: interaction.startView.offsetY + screenPoint.y - interaction.startScreen.y,
       });
+      return;
+    }
+
+    if (interaction.kind === 'overlay') {
+      interactionRef.current = { ...interaction, moved: interaction.moved || moved };
+      if (moved && !interaction.historyRecorded) {
+        pushHistorySnapshot(interaction.startScene);
+        interactionRef.current = {
+          ...interaction,
+          historyRecorded: true,
+          moved: interaction.moved || moved,
+        };
+      }
+
+      const dx = (screenPoint.x - interaction.startScreen.x) / view.scale;
+      const dy = (screenPoint.y - interaction.startScreen.y) / view.scale;
+      const startOverlay = interaction.startScene.overlays.find(
+        (overlay) => overlay.id === interaction.id,
+      );
+
+      if (startOverlay) {
+        setOverlays((current) =>
+          current.map((overlay) =>
+            overlay.id === interaction.id
+              ? {
+                  ...overlay,
+                  x: startOverlay.x + dx,
+                  y: startOverlay.y + dy,
+                }
+              : overlay,
+          ),
+        );
+      }
       return;
     }
 
@@ -454,6 +656,7 @@ export default function App() {
     const lengthMm = segmentLengthInMm(points[startIndex], points[endIndex], mmPerUnit);
 
     setSelectedSegment({ startIndex });
+    setSelectedOverlayId(null);
     setLengthInput(String(Math.round(lengthMm * 10) / 10));
     setStatus('Segment sélectionné. Saisissez sa longueur réelle en millimètres.');
   }
@@ -574,6 +777,12 @@ export default function App() {
           }
         : current,
     );
+    setOverlays((current) =>
+      current.map((overlay) => ({
+        ...overlay,
+        ...scaleImageFrameAround(overlay, origin, scaleFactor),
+      })),
+    );
     setStatus(`Calibration appliquée : segment réglé à ${formatMm(targetMm)} mm.`);
   }
 
@@ -595,6 +804,9 @@ export default function App() {
     recordHistory();
     setPoints((current) => rotatePointsAround(current, origin, rotation));
     setImage((current) => (current ? rotateImageFrameAround(current, origin, rotation) : current));
+    setOverlays((current) =>
+      current.map((overlay) => rotateImageFrameAround(overlay, origin, rotation)),
+    );
     setContextMenu(null);
     setStatus('Segment remis horizontal, photo et tracé réorientés.');
   }
@@ -695,6 +907,14 @@ export default function App() {
             <span>État</span>
             <strong>{isClosed ? 'Fermé' : 'Ouvert'}</strong>
           </div>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={showTraceDimensions}
+              onChange={(event) => setShowTraceDimensions(event.target.checked)}
+            />
+            Afficher dimensions
+          </label>
           <div className="button-row">
             <button
               className="secondary-button"
@@ -799,6 +1019,81 @@ export default function App() {
           )}
         </section>
 
+        <section className="tool-section">
+          <div className="section-title">Formes test</div>
+          <label className="field">
+            <span>Hydration bladder</span>
+            <select
+              value={overlayTemplateId}
+              onChange={(event) => setOverlayTemplateId(event.target.value)}
+            >
+              {HYDRATION_BLADDER_TEMPLATES.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="secondary-button" type="button" onClick={() => addOverlay(overlayTemplateId)}>
+            <Droplets size={17} />
+            Ajouter la forme
+          </button>
+          {selectedOverlay && selectedOverlayTemplate ? (
+            <div className="overlay-controls">
+              <div className="metric-row">
+                <span>Sélection</span>
+                <strong>{selectedOverlayTemplate.label}</strong>
+              </div>
+              <div className="metric-row">
+                <span>Taille</span>
+                <strong>
+                  {formatMm(selectedOverlay.width)} x {formatMm(selectedOverlay.height)} mm
+                </strong>
+              </div>
+              <label className="field">
+                <span>Rotation</span>
+                <input
+                  type="number"
+                  step="5"
+                  value={Math.round((selectedOverlay.rotation * 180) / Math.PI)}
+                  onFocus={recordHistory}
+                  onChange={(event) =>
+                    updateSelectedOverlay({
+                      rotation: (Number(event.target.value) * Math.PI) / 180,
+                    })
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Opacité</span>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={selectedOverlay.opacity}
+                  onPointerDown={recordHistory}
+                  onChange={(event) =>
+                    updateSelectedOverlay({
+                      opacity: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <button className="secondary-button" type="button" onClick={toggleSelectedOverlayMirror}>
+                <FlipHorizontal size={17} />
+                Miroir
+              </button>
+              <button className="secondary-button" type="button" onClick={deleteSelectedOverlay}>
+                <Trash2 size={17} />
+                Supprimer
+              </button>
+            </div>
+          ) : (
+            <p className="empty-state">Ajoutez une forme, puis glissez-la directement sur le tracé.</p>
+          )}
+        </section>
+
         <div className="status-line">{status}</div>
       </aside>
 
@@ -835,6 +1130,97 @@ export default function App() {
               />
             )}
 
+            {overlays.map((overlay) => {
+              const template = findBladderTemplate(overlay.templateId);
+
+              if (!template) {
+                return null;
+              }
+
+              const selected = overlay.id === selectedOverlayId;
+              const scaleX = overlay.width / template.widthMm;
+              const scaleY = overlay.height / template.heightMm;
+              const pdfViewBox = template.viewBoxPt;
+
+              return (
+                <g
+                  key={overlay.id}
+                  className={selected ? 'scene-overlay selected' : 'scene-overlay'}
+                  opacity={overlay.opacity}
+                  transform={`translate(${overlay.x} ${overlay.y}) rotate(${(overlay.rotation * 180) / Math.PI} ${
+                    overlay.width / 2
+                  } ${overlay.height / 2})`}
+                  onPointerDown={(event) => handleOverlayPointerDown(overlay.id, event)}
+                >
+                  <rect
+                    className="scene-overlay-hit-area"
+                    x={-24 * scaleX}
+                    y={0}
+                    width={overlay.width + 48 * scaleX}
+                    height={overlay.height + 12 * scaleY}
+                  />
+                  {selected ? (
+                    <rect
+                      className="scene-overlay-selection"
+                      x={0}
+                      y={0}
+                      width={overlay.width}
+                      height={overlay.height}
+                    />
+                  ) : null}
+                  <g transform={`scale(${scaleX} ${scaleY})`}>
+                    <g transform={overlay.mirrored ? `translate(${template.widthMm} 0) scale(-1 1)` : undefined}>
+                    {template.paths
+                      .filter((path) => path.space === 'template-mm')
+                      .map((path, index) => (
+                        <path
+                          key={`template-mm-${path.kind}-${index}`}
+                          className={`bladder-path ${path.kind}`}
+                          d={path.d}
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      ))}
+                    <g transform={template.displayTransform}>
+                    {pdfViewBox ? (
+                      <g
+                        transform={`translate(${-pdfViewBox.x * PDF_POINT_TO_MM} ${
+                          -pdfViewBox.y * PDF_POINT_TO_MM
+                        })`}
+                      >
+                        <g transform={`scale(${PDF_POINT_TO_MM})`}>
+                          {template.paths
+                            .filter((path) => path.space !== 'template-mm')
+                            .map((path, index) => (
+                              <path
+                                key={`${path.kind}-${index}`}
+                                className={`bladder-path ${path.kind}`}
+                                d={path.d}
+                                transform={path.transform}
+                                vectorEffect="non-scaling-stroke"
+                              />
+                            ))}
+                        </g>
+                      </g>
+                    ) : (
+                      template.paths
+                        .filter((path) => path.space !== 'template-mm')
+                        .map((path, index) => (
+                          <path
+                            key={`${path.kind}-${index}`}
+                            className={`bladder-path ${path.kind}`}
+                            d={path.d}
+                            transform={path.transform}
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        ))
+                    )}
+                    </g>
+                    </g>
+                  </g>
+                </g>
+              );
+            })}
+
             {points.length > 1 && (
               <>
                 {isClosed ? (
@@ -852,6 +1238,152 @@ export default function App() {
                 ) : null}
               </>
             )}
+
+            {showTraceDimensions && traceBounds && points.length > 1 ? (
+              <g className="trace-dimensions">
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.minX}
+                  y1={traceBounds.minY - dimensionOffset}
+                  x2={traceBounds.maxX}
+                  y2={traceBounds.minY - dimensionOffset}
+                />
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.minX}
+                  y1={traceBounds.minY}
+                  x2={traceBounds.minX}
+                  y2={traceBounds.minY - dimensionOffset}
+                />
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.maxX}
+                  y1={traceBounds.minY}
+                  x2={traceBounds.maxX}
+                  y2={traceBounds.minY - dimensionOffset}
+                />
+                <line
+                  className="trace-dimension-tick"
+                  x1={traceBounds.minX}
+                  y1={traceBounds.minY - dimensionOffset - dimensionTick}
+                  x2={traceBounds.minX}
+                  y2={traceBounds.minY - dimensionOffset + dimensionTick}
+                />
+                <line
+                  className="trace-dimension-tick"
+                  x1={traceBounds.maxX}
+                  y1={traceBounds.minY - dimensionOffset - dimensionTick}
+                  x2={traceBounds.maxX}
+                  y2={traceBounds.minY - dimensionOffset + dimensionTick}
+                />
+                <text
+                  className="trace-dimension-text"
+                  x={(traceBounds.minX + traceBounds.maxX) / 2}
+                  y={traceBounds.minY - dimensionOffset - dimensionTextOffset}
+                  fontSize={dimensionFontSize}
+                  strokeWidth={dimensionTextStroke}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                >
+                  {formatMm((traceBounds.maxX - traceBounds.minX) * mmPerUnit)} mm
+                </text>
+
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.maxX + dimensionOffset}
+                  y1={traceBounds.minY}
+                  x2={traceBounds.maxX + dimensionOffset}
+                  y2={traceBounds.maxY}
+                />
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.maxX}
+                  y1={traceBounds.minY}
+                  x2={traceBounds.maxX + dimensionOffset}
+                  y2={traceBounds.minY}
+                />
+                <line
+                  className="trace-dimension-line"
+                  x1={traceBounds.maxX}
+                  y1={traceBounds.maxY}
+                  x2={traceBounds.maxX + dimensionOffset}
+                  y2={traceBounds.maxY}
+                />
+                <line
+                  className="trace-dimension-tick"
+                  x1={traceBounds.maxX + dimensionOffset - dimensionTick}
+                  y1={traceBounds.minY}
+                  x2={traceBounds.maxX + dimensionOffset + dimensionTick}
+                  y2={traceBounds.minY}
+                />
+                <line
+                  className="trace-dimension-tick"
+                  x1={traceBounds.maxX + dimensionOffset - dimensionTick}
+                  y1={traceBounds.maxY}
+                  x2={traceBounds.maxX + dimensionOffset + dimensionTick}
+                  y2={traceBounds.maxY}
+                />
+                <text
+                  className="trace-dimension-text"
+                  x={traceBounds.maxX + dimensionOffset + dimensionTextOffset}
+                  y={(traceBounds.minY + traceBounds.maxY) / 2}
+                  fontSize={dimensionFontSize}
+                  strokeWidth={dimensionTextStroke}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                >
+                  {formatMm((traceBounds.maxY - traceBounds.minY) * mmPerUnit)} mm
+                </text>
+
+                {Array.from({ length: segmentCount }, (_, index) => {
+                  const endIndex = segmentEndIndex(index, points.length, isClosed);
+                  const a = points[index];
+                  const b = points[endIndex];
+                  const dx = b.x - a.x;
+                  const dy = b.y - a.y;
+                  const length = Math.hypot(dx, dy);
+
+                  if (length === 0) {
+                    return null;
+                  }
+
+                  const midpoint = {
+                    x: (a.x + b.x) / 2,
+                    y: (a.y + b.y) / 2,
+                  };
+                  let normal = {
+                    x: -dy / length,
+                    y: dx / length,
+                  };
+
+                  if (traceCentroid) {
+                    const awayFromCenter = {
+                      x: midpoint.x - traceCentroid.x,
+                      y: midpoint.y - traceCentroid.y,
+                    };
+
+                    if (normal.x * awayFromCenter.x + normal.y * awayFromCenter.y < 0) {
+                      normal = { x: -normal.x, y: -normal.y };
+                    }
+                  }
+
+                  return (
+                    <text
+                      key={`segment-dimension-${index}-${endIndex}`}
+                      className="trace-dimension-text segment"
+                      x={midpoint.x + normal.x * segmentDimensionOffset}
+                      y={midpoint.y + normal.y * segmentDimensionOffset}
+                      fontSize={dimensionFontSize}
+                      strokeWidth={dimensionTextStroke}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                    >
+                      {formatMm(segmentLengthInMm(a, b, mmPerUnit))} mm
+                    </text>
+                  );
+                })}
+              </g>
+            ) : null}
 
             {Array.from({ length: segmentCount }, (_, index) => {
               const endIndex = segmentEndIndex(index, points.length, isClosed);
