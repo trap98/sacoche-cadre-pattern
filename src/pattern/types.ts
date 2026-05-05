@@ -38,6 +38,15 @@ export type GussetOptions = {
   splitMode: 'single-piece' | 'one-piece-per-tube' | 'manual';
   angleBreakThresholdDeg: number;
   manualBreakSegmentIndices?: number[];
+  cablePass?: CablePassOptions;
+};
+
+export type CablePassOptions = {
+  enabled: boolean;
+  segmentIndex: number;
+  distanceFromTopMm?: number;
+  distanceFromSegmentStartMm?: number;
+  overlapMm: number;
 };
 
 export type PatternPiece = {
@@ -47,6 +56,7 @@ export type PatternPiece = {
     | 'face-panel'
     | 'face-panel-upper'
     | 'face-panel-lower'
+    | 'compartment-divider'
     | 'gusset'
     | 'zip-end-patch'
     | 'zip-cover'

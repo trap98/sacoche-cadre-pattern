@@ -3,6 +3,7 @@ import {
   applyApproximateSeamAllowance,
   boundingBox,
   clipPolygonToHorizontalRange,
+  horizontalLineIntersections,
   mirrorPathOnYAxis,
   normalizePath,
   rectangle,
@@ -135,6 +136,28 @@ function makeLabelAnnotation(label: string, path: Point[]) {
     label,
     points: [{ x: bounds.minX + bounds.width / 2, y: bounds.minY - 8 }],
   };
+}
+
+function widestHorizontalSpanLength(outline: Point[], y: number): number | null {
+  const intersections = horizontalLineIntersections(outline, y);
+
+  if (intersections.length < 2) {
+    return null;
+  }
+
+  let widest = intersections[1] - intersections[0];
+
+  for (let index = 2; index < intersections.length; index += 2) {
+    const next = intersections[index + 1];
+
+    if (next === undefined) {
+      break;
+    }
+
+    widest = Math.max(widest, next - intersections[index]);
+  }
+
+  return widest;
 }
 
 function rotatePoint(point: Point, origin: Point, angleRadians: number): Point {
@@ -319,6 +342,41 @@ export function generateFacePieces(
       annotations: [makeLabelAnnotation(coverLabel, coverPath)],
     });
   });
+
+  const zippers = activeZippers(face, outline, parameters);
+
+  if (zippers.length >= 2) {
+    const secondZipY = boundingBox(outline).minY + zippers[1].distanceFromTopTubeMm;
+    const dividerLength = widestHorizontalSpanLength(
+      outline,
+      secondZipY - parameters.zipperCutoutHeightMm / 2,
+    );
+
+    if (dividerLength !== null && dividerLength > 0) {
+      const label = `Face ${faceName} - cloison au-dessus zip 2`;
+      const referencePath = rectangle(dividerLength, parameters.bagDepthMm);
+      const path = applyApproximateSeamAllowance(referencePath, parameters.seamAllowanceMm);
+
+      pieces.push({
+        id: `face-${faceName.toLowerCase()}-zip-2-compartment-divider`,
+        label,
+        kind: 'compartment-divider',
+        paths: [path],
+        referencePaths: [referencePath],
+        annotations: [
+          makeLabelAnnotation(label, path),
+          {
+            type: 'fold-line',
+            label: 'Milieu cloison',
+            points: [
+              { x: 0, y: parameters.bagDepthMm / 2 },
+              { x: dividerLength, y: parameters.bagDepthMm / 2 },
+            ],
+          },
+        ],
+      });
+    }
+  }
 
   return pieces;
 }

@@ -206,12 +206,27 @@ describe('face generation', () => {
     expect(pieces.filter((piece) => piece.kind === 'zip-cover')).toHaveLength(2);
   });
 
+  it('adds a compartment divider above the second zip', () => {
+    const pieces = generateFacePieces(
+      'A',
+      rectangleShape,
+      faceWithZips(25, 55),
+      testParameters({ zipperCutoutHeightMm: 10, bagDepthMm: 45 }),
+    );
+    const divider = pieces.find((piece) => piece.kind === 'compartment-divider');
+
+    expect(divider).toBeDefined();
+    expect(divider!.label).toBe('Face A - cloison au-dessus zip 2');
+    expect(boundingBox(divider!.referencePaths![0])).toMatchObject({ width: 100, height: 45 });
+  });
+
   it('allows face A and face B to use different zip configurations', () => {
     const pieces = generatePattern(
       rectangleShape,
       testParameters({
         faceA: faceWithZips(30, 55),
         faceB: faceWithZips(),
+        zipperCutoutHeightMm: 10,
       }),
     );
 
@@ -345,5 +360,79 @@ describe('gusset generation', () => {
 
     expect(pieces.length).toBeLessThan(curvedTubeShape.outline.length);
     expect(pieces.some((piece) => piece.label === 'Soufflet section 1')).toBe(true);
+  });
+
+  it('splits the configured gusset segment with a cable pass overlap', () => {
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'one-piece-per-tube',
+        angleBreakThresholdDeg: 25,
+        cablePass: {
+          enabled: true,
+          segmentIndex: 2,
+          distanceFromSegmentStartMm: 40,
+          overlapMm: 10,
+        },
+      },
+      testParameters({ bagDepthMm: 50 }),
+    );
+    const cablePassPieces = pieces.filter((piece) => piece.id.includes('cable-pass'));
+    const cablePassLength = cablePassPieces.reduce(
+      (total, piece) => total + boundingBox(piece.referencePaths![0]).width,
+      0,
+    );
+
+    expect(cablePassPieces).toHaveLength(2);
+    expect(cablePassLength).toBe(110);
+    expect(cablePassPieces[0].annotations.some((annotation) => annotation.label?.includes('Chevauchement'))).toBe(false);
+  });
+
+  it('does not add seam allowance on cable pass bias edges', () => {
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'one-piece-per-tube',
+        angleBreakThresholdDeg: 25,
+        cablePass: {
+          enabled: true,
+          segmentIndex: 2,
+          distanceFromSegmentStartMm: 40,
+          overlapMm: 10,
+        },
+      },
+      testParameters({ bagDepthMm: 50, seamAllowanceMm: 10 }),
+    );
+    const before = pieces.find((piece) => piece.id.includes('before-cable-pass'));
+    const after = pieces.find((piece) => piece.id.includes('after-cable-pass'));
+
+    expect(before).toBeDefined();
+    expect(after).toBeDefined();
+    expect(boundingBox(before!.referencePaths![0])).toMatchObject({ width: 50 });
+    expect(boundingBox(before!.paths[0])).toMatchObject({ minX: -10, maxX: 50, width: 60 });
+    expect(boundingBox(after!.referencePaths![0])).toMatchObject({ width: 60 });
+    expect(boundingBox(after!.paths[0])).toMatchObject({ minX: 0, maxX: 70, width: 70 });
+  });
+
+  it('places the cable pass from the top of the selected segment', () => {
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'one-piece-per-tube',
+        angleBreakThresholdDeg: 25,
+        cablePass: {
+          enabled: true,
+          segmentIndex: 3,
+          distanceFromTopMm: 20,
+          overlapMm: 10,
+        },
+      },
+      testParameters({ bagDepthMm: 50 }),
+    );
+    const cablePassPieces = pieces.filter((piece) => piece.id.includes('cable-pass'));
+
+    expect(cablePassPieces).toHaveLength(2);
+    expect(boundingBox(cablePassPieces[0].referencePaths![0]).width).toBe(70);
+    expect(boundingBox(cablePassPieces[1].referencePaths![0]).width).toBe(20);
   });
 });

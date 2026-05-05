@@ -49,7 +49,10 @@ import {
   findBladderTemplate,
   HYDRATION_BLADDER_TEMPLATES,
 } from './overlays/hydrationBladders';
-import { DEFAULT_PATTERN_PARAMETERS } from './pattern/defaults';
+import {
+  DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
+  DEFAULT_PATTERN_PARAMETERS,
+} from './pattern/defaults';
 import { horizontalLineIntersections } from './pattern/geometry';
 import { PatternWorkspace } from './pattern/PatternWorkspace';
 import { createValidatedBagShape } from './pattern/shape';
@@ -394,6 +397,18 @@ export default function App() {
   );
   const isManualGussetSetup =
     mode === 'zip-setup' && patternParameters.gusset.splitMode === 'manual';
+  const cablePassSegmentIndex = patternParameters.gusset.cablePass?.segmentIndex ?? 2;
+  const canSelectCablePassSegment =
+    mode === 'zip-setup' && patternParameters.gusset.cablePass?.enabled;
+  const cablePassSegmentLengthMm = useMemo(() => {
+    if (points.length < 2 || cablePassSegmentIndex < 0 || cablePassSegmentIndex >= segmentCount) {
+      return 0;
+    }
+
+    const endIndex = segmentEndIndex(cablePassSegmentIndex, points.length, isClosed);
+
+    return segmentLengthInMm(points[cablePassSegmentIndex], points[endIndex], mmPerUnit);
+  }, [cablePassSegmentIndex, isClosed, mmPerUnit, points, segmentCount]);
   const zipPreviews = useMemo(() => {
     if (mode !== 'zip-setup' || !isClosed || !traceBounds) {
       return [];
@@ -581,6 +596,38 @@ export default function App() {
 
   function updatePatternParameters(patch: Partial<PatternParameters>) {
     setPatternParameters((current) => ({ ...current, ...patch }));
+  }
+
+  function updateGusset(patch: Partial<PatternParameters['gusset']>) {
+    setPatternParameters((current) => ({
+      ...current,
+      gusset: {
+        ...current.gusset,
+        ...patch,
+      },
+    }));
+  }
+
+  function updateCablePass(patch: Partial<NonNullable<PatternParameters['gusset']['cablePass']>>) {
+    setPatternParameters((current) => {
+      const currentCablePass = current.gusset.cablePass ?? {
+        enabled: false,
+        segmentIndex: 2,
+        distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
+        overlapMm: 10,
+      };
+
+      return {
+        ...current,
+        gusset: {
+          ...current.gusset,
+          cablePass: {
+            ...currentCablePass,
+            ...patch,
+          },
+        },
+      };
+    });
   }
 
   function updateFace(faceKey: FaceKey, updater: (face: FaceOptions) => FaceOptions) {
@@ -898,6 +945,23 @@ export default function App() {
     setSelectedOverlayId(null);
     setLengthInput(String(Math.round(lengthMm * 10) / 10));
     setStatus('Segment sélectionné. Saisissez sa longueur réelle en millimètres.');
+  }
+
+  function selectCablePassSegment(startIndex: number, event: PointerEvent<SVGLineElement>) {
+    event.stopPropagation();
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    setContextMenu(null);
+    setSelectedSegment(null);
+    setSelectedOverlayId(null);
+    updateCablePass({
+      enabled: true,
+      segmentIndex: startIndex,
+    });
+    setStatus(`Segment ${startIndex + 1} sélectionné pour le passe cable.`);
   }
 
   function insertPointInSegment(startIndex: number, event: MouseEvent<SVGLineElement>) {
@@ -1397,18 +1461,83 @@ export default function App() {
             {renderZipSetupFaceControls('faceB', 'Face B')}
             <section className="tool-section">
               <div className="section-title">Soufflet</div>
+              {(() => {
+                const cablePass = patternParameters.gusset.cablePass ?? {
+                  enabled: false,
+                  segmentIndex: 2,
+                  distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
+                  overlapMm: 10,
+                };
+                const distanceFromTopMm =
+                  cablePass.distanceFromTopMm ??
+                  cablePass.distanceFromSegmentStartMm ??
+                  DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
+
+                return (
+                  <>
+                    <label className="checkbox-field">
+                      <input
+                        type="checkbox"
+                        checked={cablePass.enabled}
+                        onChange={(event) => updateCablePass({ enabled: event.target.checked })}
+                      />
+                      <span>Passe cable down tube</span>
+                    </label>
+                    {cablePass.enabled ? (
+                      <>
+                        <label className="field">
+                          <span>Segment passe cable</span>
+                          <input
+                            type="number"
+                            min="1"
+                            max={points.length}
+                            step="1"
+                            value={cablePass.segmentIndex + 1}
+                            onChange={(event) =>
+                              updateCablePass({
+                                segmentIndex: Math.max(0, updateNumber(event.target.value) - 1),
+                              })
+                            }
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Distance depuis haut du segment</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={Math.max(0, Math.round(cablePassSegmentLengthMm * 10) / 10)}
+                            step="1"
+                            value={Math.round(distanceFromTopMm * 10) / 10}
+                            onChange={(event) =>
+                              updateCablePass({ distanceFromTopMm: updateNumber(event.target.value) })
+                            }
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Chevauchement passe cable</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={cablePass.overlapMm}
+                            onChange={(event) =>
+                              updateCablePass({ overlapMm: updateNumber(event.target.value) })
+                            }
+                          />
+                        </label>
+                      </>
+                    ) : null}
+                  </>
+                );
+              })()}
               <label className="field">
                 <span>Découpe</span>
                 <select
                   value={patternParameters.gusset.splitMode}
                   onChange={(event) =>
-                    setPatternParameters((current) => ({
-                      ...current,
-                      gusset: {
-                        ...current.gusset,
-                        splitMode: event.target.value as PatternParameters['gusset']['splitMode'],
-                      },
-                    }))
+                    updateGusset({
+                      splitMode: event.target.value as PatternParameters['gusset']['splitMode'],
+                    })
                   }
                 >
                   <option value="single-piece">Une pièce</option>
@@ -1426,13 +1555,9 @@ export default function App() {
                     step="1"
                     value={patternParameters.gusset.angleBreakThresholdDeg}
                     onChange={(event) =>
-                      setPatternParameters((current) => ({
-                        ...current,
-                        gusset: {
-                          ...current.gusset,
-                          angleBreakThresholdDeg: updateNumber(event.target.value),
-                        },
-                      }))
+                      updateGusset({
+                        angleBreakThresholdDeg: updateNumber(event.target.value),
+                      })
                     }
                   />
                 </label>
@@ -1443,7 +1568,9 @@ export default function App() {
                     <span>Points de coupe</span>
                     <strong>{manualGussetBreaks.length}</strong>
                   </div>
-                  <p className="empty-state">Cliquez sur les points du tracé où le soufflet doit être coupé.</p>
+                  <p className="empty-state">
+                    Cliquez sur les points du tracé pour couper le soufflet, ou sur un segment pour placer le passe cable.
+                  </p>
                   <button
                     className="secondary-button"
                     type="button"
@@ -1912,6 +2039,32 @@ export default function App() {
                   onPointerDown={(event) => selectSegment(index, event)}
                   onDoubleClick={(event) => insertPointInSegment(index, event)}
                   onContextMenu={(event) => openSegmentContextMenu(index, event)}
+                />
+              );
+            }) : null}
+
+            {canSelectCablePassSegment ? Array.from({ length: segmentCount }, (_, index) => {
+              const endIndex = segmentEndIndex(index, points.length, isClosed);
+              const a = points[index];
+              const b = points[endIndex];
+              const selected = cablePassSegmentIndex === index;
+
+              return (
+                <line
+                  key={`cable-pass-segment-${index}-${endIndex}`}
+                  className={[
+                    'segment-hit-area',
+                    'cable-pass-segment',
+                    selected ? 'selected cable-pass-selected' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  vectorEffect="non-scaling-stroke"
+                  onPointerDown={(event) => selectCablePassSegment(index, event)}
                 />
               );
             }) : null}

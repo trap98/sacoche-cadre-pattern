@@ -381,6 +381,18 @@ button {
   stroke: rgba(216, 118, 42, 0.36);
 }
 
+.segment-hit-area.cable-pass-segment {
+  cursor: pointer;
+}
+
+.segment-hit-area.cable-pass-segment:hover {
+  stroke: rgba(64, 104, 121, 0.28);
+}
+
+.segment-hit-area.cable-pass-selected {
+  stroke: rgba(64, 104, 121, 0.5);
+}
+
 .point-node {
   fill: #ffffff;
   stroke: #1f6f5b;
@@ -579,7 +591,8 @@ button {
 
 .pattern-piece-path.face-panel,
 .pattern-piece-path.face-panel-upper,
-.pattern-piece-path.face-panel-lower {
+.pattern-piece-path.face-panel-lower,
+.pattern-piece-path.compartment-divider {
   fill: #edf7f4;
   stroke: #1f6f5b;
 }
@@ -615,6 +628,11 @@ button {
 .pattern-piece-path.zip-cover {
   fill: #f3eefb;
   stroke: #6f4ca6;
+}
+
+.pattern-piece-path.compartment-divider {
+  fill: #eaf1f5;
+  stroke: #406879;
 }
 
 .pattern-annotation {

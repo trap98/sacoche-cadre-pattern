@@ -1,4 +1,12 @@
-import type { GussetOptions, PatternParameters, PatternPiece, Point, ValidatedBagShape } from './types';
+import type {
+  CablePassOptions,
+  GussetOptions,
+  PatternAnnotation,
+  PatternParameters,
+  PatternPiece,
+  Point,
+  ValidatedBagShape,
+} from './types';
 import { applyApproximateSeamAllowance, boundingBox, polygonPerimeter, rectangle, segmentLength } from './geometry';
 
 type GussetSection = {
@@ -7,9 +15,45 @@ type GussetSection = {
   length: number;
 };
 
-function makeGussetPiece(id: string, label: string, length: number, depth: number, seamAllowanceMm: number): PatternPiece {
+type SeamlessEdge = 'left' | 'right';
+
+function rectangularSeamAllowancePath(
+  length: number,
+  depth: number,
+  seamAllowanceMm: number,
+  seamlessEdges: SeamlessEdge[] = [],
+): Point[] {
+  if (seamAllowanceMm <= 0) {
+    return rectangle(length, depth);
+  }
+
+  const hasNoLeftSeam = seamlessEdges.includes('left');
+  const hasNoRightSeam = seamlessEdges.includes('right');
+
+  return rectangle(
+    length + (hasNoLeftSeam ? 0 : seamAllowanceMm) + (hasNoRightSeam ? 0 : seamAllowanceMm),
+    depth + seamAllowanceMm * 2,
+    {
+      x: hasNoLeftSeam ? 0 : -seamAllowanceMm,
+      y: -seamAllowanceMm,
+    },
+  );
+}
+
+function makeGussetPiece(
+  id: string,
+  label: string,
+  length: number,
+  depth: number,
+  seamAllowanceMm: number,
+  extraAnnotations: PatternAnnotation[] = [],
+  seamlessEdges: SeamlessEdge[] = [],
+): PatternPiece {
   const referencePath = rectangle(length, depth);
-  const path = applyApproximateSeamAllowance(referencePath, seamAllowanceMm);
+  const path =
+    seamlessEdges.length > 0
+      ? rectangularSeamAllowancePath(length, depth, seamAllowanceMm, seamlessEdges)
+      : applyApproximateSeamAllowance(referencePath, seamAllowanceMm);
   const bounds = boundingBox(path);
 
   return {
@@ -32,6 +76,7 @@ function makeGussetPiece(id: string, label: string, length: number, depth: numbe
           { x: length, y: depth / 2 },
         ],
       },
+      ...extraAnnotations,
     ],
   };
 }
@@ -123,6 +168,129 @@ function sectionLength(points: Point[], startSegmentIndex: number, segmentCount:
   }).reduce((total, length) => total + length, 0);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sectionContainsSegment(section: GussetSection, segmentIndex: number, totalSegments: number): boolean {
+  return Array.from(
+    { length: section.segmentCount },
+    (_, offset) => (section.startSegmentIndex + offset) % totalSegments,
+  ).includes(segmentIndex);
+}
+
+function distanceFromSectionStartToSegment(
+  points: Point[],
+  section: GussetSection,
+  segmentIndex: number,
+): number {
+  let distance = 0;
+
+  for (let offset = 0; offset < section.segmentCount; offset += 1) {
+    const currentSegmentIndex = (section.startSegmentIndex + offset) % points.length;
+
+    if (currentSegmentIndex === segmentIndex) {
+      return distance;
+    }
+
+    distance += segmentLength(points[currentSegmentIndex], points[(currentSegmentIndex + 1) % points.length]);
+  }
+
+  return distance;
+}
+
+function cablePassDistanceOnSegment(points: Point[], cablePass: CablePassOptions, segmentIndex: number): number {
+  const segmentStart = points[segmentIndex];
+  const segmentEnd = points[(segmentIndex + 1) % points.length];
+  const length = segmentLength(segmentStart, segmentEnd);
+  const distanceFromTopMm = cablePass.distanceFromTopMm;
+
+  if (distanceFromTopMm !== undefined && Number.isFinite(distanceFromTopMm)) {
+    const distanceFromTop = clamp(distanceFromTopMm, 0, length);
+    const segmentStartIsTop = segmentStart.y <= segmentEnd.y;
+
+    return segmentStartIsTop ? distanceFromTop : length - distanceFromTop;
+  }
+
+  return clamp(cablePass.distanceFromSegmentStartMm ?? length / 2, 0, length);
+}
+
+function makeGussetPiecesForSection(
+  section: GussetSection,
+  index: number,
+  points: Point[],
+  parameters: PatternParameters,
+  idOverride?: string,
+  labelOverride?: string,
+): PatternPiece[] {
+  const baseId = idOverride ?? `gusset-${index + 1}`;
+  const baseLabel =
+    labelOverride ??
+    (section.segmentCount === 1
+      ? `Soufflet ${segmentLabel(section.startSegmentIndex)}`
+      : `Soufflet section ${index + 1}`);
+  const cablePass = parameters.gusset.cablePass;
+  const segmentCount = points.length;
+  const cableSegmentIndex =
+    cablePass && segmentCount > 0
+      ? Math.trunc(clamp(cablePass.segmentIndex, 0, segmentCount - 1))
+      : -1;
+
+  if (
+    !cablePass?.enabled ||
+    cablePass.overlapMm <= 0 ||
+    cableSegmentIndex < 0 ||
+    !sectionContainsSegment(section, cableSegmentIndex, segmentCount)
+  ) {
+    return [
+      makeGussetPiece(
+        baseId,
+        baseLabel,
+        section.length,
+        parameters.bagDepthMm,
+        parameters.seamAllowanceMm,
+      ),
+    ];
+  }
+
+  const distanceToSegment = distanceFromSectionStartToSegment(points, section, cableSegmentIndex);
+  const distanceToPass =
+    distanceToSegment + cablePassDistanceOnSegment(points, cablePass, cableSegmentIndex);
+  const beforeLength = distanceToPass + cablePass.overlapMm;
+  const afterLength = section.length - distanceToPass;
+  const pieces: PatternPiece[] = [];
+
+  if (beforeLength > 0.001) {
+    pieces.push(
+      makeGussetPiece(
+        `${baseId}-before-cable-pass`,
+        `${baseLabel} - avant passe cable`,
+        beforeLength,
+        parameters.bagDepthMm,
+        parameters.seamAllowanceMm,
+        [],
+        ['right'],
+      ),
+    );
+  }
+
+  if (afterLength > 0.001) {
+    pieces.push(
+      makeGussetPiece(
+        `${baseId}-after-cable-pass`,
+        `${baseLabel} - après passe cable`,
+        afterLength,
+        parameters.bagDepthMm,
+        parameters.seamAllowanceMm,
+        [],
+        ['left'],
+      ),
+    );
+  }
+
+  return pieces;
+}
+
 function gussetSectionsByManualBreaks(
   points: Point[],
   manualBreakSegmentIndices: number[] = [],
@@ -173,16 +341,24 @@ export function generateGussetPieces(
   gusset: GussetOptions,
   parameters: PatternParameters,
 ): PatternPiece[] {
+  const effectiveParameters = {
+    ...parameters,
+    gusset,
+  };
+
   if (gusset.splitMode === 'single-piece') {
-    return [
-      makeGussetPiece(
-        'gusset-single-piece',
-        'Soufflet une pièce',
-        polygonPerimeter(shape.outline),
-        parameters.bagDepthMm,
-        parameters.seamAllowanceMm,
-      ),
-    ];
+    return makeGussetPiecesForSection(
+      {
+        startSegmentIndex: 0,
+        segmentCount: shape.outline.length,
+        length: polygonPerimeter(shape.outline),
+      },
+      0,
+      shape.outline,
+      effectiveParameters,
+      'gusset-single-piece',
+      'Soufflet une pièce',
+    );
   }
 
   const sections =
@@ -190,15 +366,7 @@ export function generateGussetPieces(
       ? gussetSectionsByManualBreaks(shape.outline, gusset.manualBreakSegmentIndices)
       : gussetSectionsByAngle(shape.outline, gusset.angleBreakThresholdDeg);
 
-  return sections.map((section, index) => {
-    return makeGussetPiece(
-      `gusset-${index + 1}`,
-      section.segmentCount === 1
-        ? `Soufflet ${segmentLabel(section.startSegmentIndex)}`
-        : `Soufflet section ${index + 1}`,
-      section.length,
-      parameters.bagDepthMm,
-      parameters.seamAllowanceMm,
-    );
-  });
+  return sections.flatMap((section, index) =>
+    makeGussetPiecesForSection(section, index, shape.outline, effectiveParameters),
+  );
 }
