@@ -64,6 +64,26 @@ function faceWithZips(...distances: number[]): FaceOptions {
   };
 }
 
+function faceWithSecondZipBottomClearance(
+  firstZipDistanceFromTopMm: number,
+  secondZipClearanceFromBottomMm: number,
+): FaceOptions {
+  return {
+    zipperCount: 2,
+    zippers: [
+      {
+        id: 'zip-1',
+        distanceFromTopTubeMm: firstZipDistanceFromTopMm,
+      },
+      {
+        id: 'zip-2',
+        distanceFromTopTubeMm: 0,
+        clearanceFromBottomTubeMm: secondZipClearanceFromBottomMm,
+      },
+    ],
+  };
+}
+
 describe('pattern shape validation', () => {
   it('rejects an open outline', () => {
     expect(() =>
@@ -213,6 +233,20 @@ describe('face generation', () => {
     expect(lower).toBeDefined();
     expect(boundingBox(upper!.paths[0]).maxY).toBe(24);
     expect(boundingBox(lower!.paths[0]).minY).toBe(36);
+  });
+
+  it('places zip 2 from the bottom clearance so the lower piece keeps the requested bladder height', () => {
+    const pieces = generateFacePieces(
+      'A',
+      rectangleShape,
+      faceWithSecondZipBottomClearance(25, 20),
+      testParameters({ zipperCutoutHeightMm: 10 }),
+    );
+    const lower = pieces.find((piece) => piece.label.includes('bas zip 2'));
+
+    expect(lower).toBeDefined();
+    expect(boundingBox(lower!.referencePaths![0]).minY).toBe(60);
+    expect(boundingBox(lower!.referencePaths![0]).height).toBe(20);
   });
 
   it('uses zipper patch dimensions from parameters', () => {

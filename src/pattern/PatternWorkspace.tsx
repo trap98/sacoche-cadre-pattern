@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, PointerEvent, WheelEvent } from 'react';
 import { makeDefaultZipper } from './defaults';
 import { generatePattern } from './generatePattern';
+import { boundingBox } from './geometry';
 import { layoutPieces } from './layoutPieces';
 import type { FaceOptions, PatternAnnotation, PatternParameters, Point, ValidatedBagShape } from './types';
 
@@ -139,6 +140,20 @@ function ensureZipperCount(face: FaceOptions, zipperCount: 0 | 1 | 2): FaceOptio
   };
 }
 
+function zipperBottomClearanceValue(
+  zipper: FaceOptions['zippers'][number],
+  shapeHeightMm: number,
+  cutoutHeightMm: number,
+): number {
+  const clearanceFromBottom = zipper.clearanceFromBottomTubeMm;
+
+  if (clearanceFromBottom !== undefined && Number.isFinite(clearanceFromBottom)) {
+    return clearanceFromBottom;
+  }
+
+  return Math.max(0, shapeHeightMm - zipper.distanceFromTopTubeMm - cutoutHeightMm / 2);
+}
+
 function FieldLabel({ children, help }: { children: string; help: string }) {
   return (
     <span className="field-label">
@@ -239,6 +254,7 @@ export function PatternWorkspace({
   const [showReferencePaths, setShowReferencePaths] = useState(true);
   const [patternView, setPatternView] = useState(INITIAL_PATTERN_VIEW);
   const [isPanning, setIsPanning] = useState(false);
+  const shapeBounds = useMemo(() => boundingBox(shape.outline), [shape.outline]);
   const pieces = useMemo(() => generatePattern(shape, parameters), [shape, parameters]);
   const layout = useMemo(() => layoutPieces(pieces), [pieces]);
 
@@ -365,32 +381,47 @@ export function PatternWorkspace({
           </select>
         </label>
 
-        {face.zippers.slice(0, face.zipperCount).map((zipper, index) => (
-          <label className="field" key={zipper.id}>
-            <FieldLabel help="Distance verticale en millimètres entre le haut du tracé, assimilé au top tube, et l'axe de la fermeture éclair.">
-              {`Hauteur zip ${index + 1} depuis top tube`}
-            </FieldLabel>
-            <input
-              type="number"
-              min="0"
-              step="1"
-              value={zipper.distanceFromTopTubeMm}
-              onChange={(event) =>
-                updateFace(faceKey, (currentFace) => ({
-                  ...currentFace,
-                  zippers: currentFace.zippers.map((currentZipper, zipperIndex) =>
-                    zipperIndex === index
-                      ? {
-                          ...currentZipper,
-                          distanceFromTopTubeMm: updateNumber(event.target.value),
-                        }
-                      : currentZipper,
-                  ),
-                }))
-              }
-            />
-          </label>
-        ))}
+        {face.zippers.slice(0, face.zipperCount).map((zipper, index) => {
+          const usesBottomReference = index === 1;
+          const inputValue = usesBottomReference
+            ? zipperBottomClearanceValue(zipper, shapeBounds.height, parameters.zipperCutoutHeightMm)
+            : zipper.distanceFromTopTubeMm;
+          const help = usesBottomReference
+            ? "Hauteur utile gardée entre le bas du tracé et le bas de la découpe du zip 2. Cette valeur réserve directement la place nécessaire à une hydration bladder."
+            : "Distance verticale en millimètres entre le haut du tracé, assimilé au top tube, et l'axe de la fermeture éclair.";
+          const labelText = usesBottomReference
+            ? 'Hauteur utile sous zip 2'
+            : `Hauteur zip ${index + 1} depuis top tube`;
+
+          return (
+            <label className="field" key={zipper.id}>
+              <FieldLabel help={help}>
+                {labelText}
+              </FieldLabel>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={inputValue}
+                onChange={(event) =>
+                  updateFace(faceKey, (currentFace) => ({
+                    ...currentFace,
+                    zippers: currentFace.zippers.map((currentZipper, zipperIndex) =>
+                      zipperIndex === index
+                        ? {
+                            ...currentZipper,
+                            ...(usesBottomReference
+                              ? { clearanceFromBottomTubeMm: updateNumber(event.target.value) }
+                              : { distanceFromTopTubeMm: updateNumber(event.target.value) }),
+                          }
+                        : currentZipper,
+                    ),
+                  }))
+                }
+              />
+            </label>
+          );
+        })}
       </section>
     );
   }

@@ -18,9 +18,36 @@ type FaceSection = {
   kind: PatternPiece['kind'];
 };
 
-function activeZippers(face: FaceOptions) {
+type ActiveZipper = {
+  id: string;
+  distanceFromTopTubeMm: number;
+};
+
+function resolveZipperDistanceFromTop(
+  zipper: FaceOptions['zippers'][number],
+  index: number,
+  bounds: ReturnType<typeof boundingBox>,
+  halfCutout: number,
+): number {
+  const clearanceFromBottom = zipper.clearanceFromBottomTubeMm;
+
+  if (index === 1 && clearanceFromBottom !== undefined && Number.isFinite(clearanceFromBottom)) {
+    return bounds.height - clearanceFromBottom - halfCutout;
+  }
+
+  return zipper.distanceFromTopTubeMm;
+}
+
+function activeZippers(face: FaceOptions, outline: Point[], parameters: PatternParameters): ActiveZipper[] {
+  const bounds = boundingBox(outline);
+  const halfCutout = parameters.zipperCutoutHeightMm / 2;
+
   return face.zippers
     .slice(0, face.zipperCount)
+    .map((zipper, index) => ({
+      id: zipper.id,
+      distanceFromTopTubeMm: resolveZipperDistanceFromTop(zipper, index, bounds, halfCutout),
+    }))
     .filter((zipper) => Number.isFinite(zipper.distanceFromTopTubeMm))
     .sort((a, b) => a.distanceFromTopTubeMm - b.distanceFromTopTubeMm);
 }
@@ -44,7 +71,7 @@ function buildFaceSections(
   parameters: PatternParameters,
 ): FaceSection[] {
   const bounds = boundingBox(outline);
-  const zippers = activeZippers(face);
+  const zippers = activeZippers(face, outline, parameters);
   const labels = faceSectionLabels(faceName, zippers.length);
 
   if (zippers.length === 0) {
@@ -257,7 +284,7 @@ export function generateFacePieces(
     });
   });
 
-  activeZippers(face).forEach((zipper, index) => {
+  activeZippers(face, outline, parameters).forEach((zipper, index) => {
     const zipNumber = index + 1;
     ['gauche', 'droite'].forEach((side) => {
       const label = `Face ${faceName} - patch zip ${zipNumber} ${side}`;

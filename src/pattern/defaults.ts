@@ -1,6 +1,7 @@
 import type { FaceOptions, PatternParameters, ZipperOptions } from './types';
 
 export const DEFAULT_ZIPPER_DISTANCES_MM = [40, 200] as const;
+export const DEFAULT_ZIPPER_BOTTOM_CLEARANCE_MM = 210;
 
 export function makeDefaultZipper(index: number): ZipperOptions {
   return {
@@ -8,6 +9,7 @@ export function makeDefaultZipper(index: number): ZipperOptions {
     distanceFromTopTubeMm:
       DEFAULT_ZIPPER_DISTANCES_MM[index] ??
       DEFAULT_ZIPPER_DISTANCES_MM[DEFAULT_ZIPPER_DISTANCES_MM.length - 1],
+    ...(index === 1 ? { clearanceFromBottomTubeMm: DEFAULT_ZIPPER_BOTTOM_CLEARANCE_MM } : {}),
   };
 }
 

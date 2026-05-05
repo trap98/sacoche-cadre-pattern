@@ -31,6 +31,7 @@ export type FaceOptions = {
 export type ZipperOptions = {
   id: string;
   distanceFromTopTubeMm: number;
+  clearanceFromBottomTubeMm?: number;
 };
 
 export type GussetOptions = {
