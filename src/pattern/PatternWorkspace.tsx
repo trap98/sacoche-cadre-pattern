@@ -187,7 +187,7 @@ function buildExportSvg(
             return `<text x="${toExportUnit(point.x)}" y="${toExportUnit(
               point.y,
             )}" fill="#20242b" font-family="Arial, sans-serif" font-size="${toExportUnit(
-              3.5,
+              annotation.fontSizeMm ?? 3.5,
             )}" font-weight="700" text-anchor="middle" dominant-baseline="middle">${escapeXml(
               annotation.label ?? '',
             )}</text>`;
@@ -458,6 +458,7 @@ export function PatternWorkspace({
           key={`${pieceId}-annotation-${index}`}
           x={point.x}
           y={point.y}
+          fontSize={annotation.fontSizeMm}
         >
           {annotation.label}
         </text>

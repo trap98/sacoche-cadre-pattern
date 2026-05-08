@@ -70,4 +70,5 @@ export type PatternAnnotation = {
   type: 'label' | 'fold-line' | 'stitch-line' | 'zip-line' | 'grain-line';
   label?: string;
   points: Point[];
+  fontSizeMm?: number;
 };

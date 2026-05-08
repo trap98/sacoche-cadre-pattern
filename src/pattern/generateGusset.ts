@@ -66,7 +66,8 @@ function makeGussetPiece(
       {
         type: 'label',
         label,
-        points: [{ x: bounds.minX + bounds.width / 2, y: bounds.minY - 8 }],
+        fontSizeMm: seamAllowanceMm * 0.4,
+        points: [{ x: bounds.minX + bounds.width / 2, y: bounds.minY + seamAllowanceMm / 2 }],
       },
       {
         type: 'fold-line',

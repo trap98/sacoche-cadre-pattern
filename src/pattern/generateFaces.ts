@@ -128,13 +128,14 @@ function buildFaceSections(
   return sections;
 }
 
-function makeLabelAnnotation(label: string, path: Point[]) {
+function makeLabelAnnotation(label: string, path: Point[], seamAllowanceMm: number) {
   const bounds = boundingBox(path);
 
   return {
     type: 'label' as const,
     label,
-    points: [{ x: bounds.minX + bounds.width / 2, y: bounds.minY - 8 }],
+    fontSizeMm: seamAllowanceMm * 0.5,
+    points: [{ x: bounds.minX + bounds.width / 2, y: bounds.minY + seamAllowanceMm / 2 }],
   };
 }
 
@@ -303,7 +304,7 @@ export function generateFacePieces(
       kind: section.kind,
       paths: [path],
       referencePaths: [clipped],
-      annotations: [makeLabelAnnotation(section.label, path)],
+      annotations: [makeLabelAnnotation(section.label, path, parameters.seamAllowanceMm)],
     });
   });
 
@@ -322,7 +323,7 @@ export function generateFacePieces(
         kind: 'zip-end-patch',
         paths: [path],
         referencePaths: [path],
-        annotations: [makeLabelAnnotation(label, path)],
+        annotations: [],
       });
     });
 
@@ -339,7 +340,7 @@ export function generateFacePieces(
       kind: 'zip-cover',
       paths: [coverPath],
       referencePaths: [coverPath],
-      annotations: [makeLabelAnnotation(coverLabel, coverPath)],
+      annotations: [],
     });
   });
 
@@ -364,7 +365,7 @@ export function generateFacePieces(
         paths: [path],
         referencePaths: [referencePath],
         annotations: [
-          makeLabelAnnotation(label, path),
+          makeLabelAnnotation(label, path, parameters.seamAllowanceMm),
           {
             type: 'fold-line',
             label: 'Milieu cloison',
