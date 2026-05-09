@@ -67,7 +67,7 @@ export type PatternPiece = {
 };
 
 export type PatternAnnotation = {
-  type: 'label' | 'fold-line' | 'stitch-line' | 'zip-line' | 'grain-line';
+  type: 'label' | 'fold-line' | 'stitch-line' | 'zip-line' | 'grain-line' | 'segment-mark';
   label?: string;
   points: Point[];
   fontSizeMm?: number;

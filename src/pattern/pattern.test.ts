@@ -436,3 +436,56 @@ describe('gusset generation', () => {
     expect(boundingBox(cablePassPieces[1].referencePaths![0]).width).toBe(20);
   });
 });
+
+  it('places segment marks at internal boundaries of a single-piece gusset', () => {
+    // rectangleShape segments: L0=100, L1=80, L2=100, L3=80 (total=360)
+    // Expected internal breaks (no mark at piece start/end): [100, 180, 280]
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      { splitMode: 'single-piece', angleBreakThresholdDeg: 25 },
+      testParameters({ bagDepthMm: 50, seamAllowanceMm: 10 }),
+    );
+
+    const marks = pieces[0].annotations.filter((a) => a.type === 'segment-mark');
+    const topMarks = marks.filter((m) => m.points[0].y < 0);
+    const xPositions = topMarks.map((m) => m.points[0].x).sort((a, b) => a - b);
+
+    expect(xPositions).toEqual([100, 180, 280]);
+  });
+
+  it('places segment marks correctly on cable pass before/after pieces', () => {
+    // rectangleShape: L0=100, L1=80, L2=100, L3=80, perimeter=360
+    // Cable pass on segment 2 at 40mm from start, overlap=10
+    // distanceToPass = 100+80+40 = 220, beforeLength=230, afterLength=140
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'single-piece',
+        angleBreakThresholdDeg: 25,
+        cablePass: {
+          enabled: true,
+          segmentIndex: 2,
+          distanceFromSegmentStartMm: 40,
+          overlapMm: 10,
+        },
+      },
+      testParameters({ bagDepthMm: 50, seamAllowanceMm: 10 }),
+    );
+
+    const before = pieces.find((p) => p.id.includes('before'));
+    const after = pieces.find((p) => p.id.includes('after'));
+
+    expect(before).toBeDefined();
+    expect(after).toBeDefined();
+
+    const xOf = (piece: typeof before) =>
+      piece!.annotations
+        .filter((a) => a.type === 'segment-mark' && a.points[0].y < 0)
+        .map((a) => a.points[0].x)
+        .sort((a, b) => a - b);
+
+    // Before piece: segment 0→1 at x=100, segment 1→2 at x=180 (both < 230)
+    expect(xOf(before)).toEqual([100, 180]);
+    // After piece: segment 2→3 at outline pos 280, mapped to 280-220=60
+    expect(xOf(after)).toEqual([60]);
+  });

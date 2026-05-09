@@ -1,12 +1,13 @@
-import { ArrowLeft, CircleHelp, Download, Move, RotateCcw, Scissors, Settings2, ZoomIn } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, PointerEvent, WheelEvent } from 'react';
+import { ArrowLeft, CircleHelp, Download, Image, Move, RotateCcw, Scissors, Settings2, ZoomIn } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, PointerEvent } from 'react';
 import { DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM } from './defaults';
 import { generatePattern } from './generatePattern';
 import { boundingBox, segmentLength } from './geometry';
 import { layoutPieces } from './layoutPieces';
 import { ensureZipperCount, updateNumber, zipperBottomClearanceValue } from './zipperOptions';
 import type { FaceOptions, PatternAnnotation, PatternParameters, Point, ValidatedBagShape } from './types';
+import { downloadSvgSnapshotAsPng } from '../App';
 
 type PatternWorkspaceProps = {
   shape: ValidatedBagShape;
@@ -14,6 +15,7 @@ type PatternWorkspaceProps = {
   onParametersChange: (parameters: PatternParameters) => void;
   onBackToTrace: () => void;
   backButtonLabel?: string;
+  canvasSvgSnapshot?: string;
 };
 
 type PatternViewTransform = {
@@ -146,6 +148,7 @@ function FieldLabel({ children, help }: { children: string; help: string }) {
   );
 }
 
+
 function buildExportSvg(
   layout: ReturnType<typeof layoutPieces>,
   includeReferencePaths: boolean,
@@ -193,6 +196,12 @@ function buildExportSvg(
             )}</text>`;
           }
 
+          if (annotation.type === 'segment-mark') {
+            return `<polyline points="${pathPointsForExport(
+              annotation.points,
+            )}" fill="none" stroke="#9a5d1f" stroke-width="${toExportUnit(0.3)}" />`;
+          }
+
           return `<polyline points="${pathPointsForExport(
             annotation.points,
           )}" fill="none" stroke="#4b535f" stroke-width="${toExportUnit(
@@ -230,6 +239,7 @@ export function PatternWorkspace({
   onParametersChange,
   onBackToTrace,
   backButtonLabel = 'Retour au tracé',
+  canvasSvgSnapshot,
 }: PatternWorkspaceProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const panInteractionRef = useRef<PanInteraction | null>(null);
@@ -255,7 +265,7 @@ export function PatternWorkspace({
     );
   }, [cablePassSegmentIndex, shape.outline]);
 
-  function clientToPatternPoint(event: { clientX: number; clientY: number }): Point {
+  const clientToPatternPoint = useCallback((event: { clientX: number; clientY: number }): Point => {
     const rect = svgRef.current?.getBoundingClientRect();
 
     if (!rect) {
@@ -272,12 +282,13 @@ export function PatternWorkspace({
       x: (event.clientX - rect.left - paddingX) / scale,
       y: (event.clientY - rect.top - paddingY) / scale,
     };
-  }
+  }, [layout]);
 
   function handlePreviewPointerDown(event: PointerEvent<SVGSVGElement>) {
     if (event.button !== 0) {
       return;
     }
+    event.preventDefault();
 
     panInteractionRef.current = {
       pointerId: event.pointerId,
@@ -316,22 +327,29 @@ export function PatternWorkspace({
     event.currentTarget.releasePointerCapture(event.pointerId);
   }
 
-  function handlePreviewWheel(event: WheelEvent<SVGSVGElement>) {
-    event.preventDefault();
-    const pointer = clientToPatternPoint(event);
-    const zoomFactor = event.deltaY < 0 ? 1.12 : 0.88;
-    const nextScale = clampPatternZoom(patternView.scale * zoomFactor);
-    const contentPoint = {
-      x: (pointer.x - patternView.offsetX) / patternView.scale,
-      y: (pointer.y - patternView.offsetY) / patternView.scale,
-    };
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
 
-    setPatternView({
-      scale: nextScale,
-      offsetX: pointer.x - contentPoint.x * nextScale,
-      offsetY: pointer.y - contentPoint.y * nextScale,
-    });
-  }
+    function handlePreviewWheel(event: WheelEvent) {
+      event.preventDefault();
+      const pointer = clientToPatternPoint(event);
+      const zoomFactor = event.deltaY < 0 ? 1.12 : 0.88;
+      const nextScale = clampPatternZoom(patternView.scale * zoomFactor);
+      const contentPoint = {
+        x: (pointer.x - patternView.offsetX) / patternView.scale,
+        y: (pointer.y - patternView.offsetY) / patternView.scale,
+      };
+      setPatternView({
+        scale: nextScale,
+        offsetX: pointer.x - contentPoint.x * nextScale,
+        offsetY: pointer.y - contentPoint.y * nextScale,
+      });
+    }
+
+    svg.addEventListener('wheel', handlePreviewWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', handlePreviewWheel);
+  }, [patternView, clientToPatternPoint]);
 
   function resetPatternView() {
     setPatternView(INITIAL_PATTERN_VIEW);
@@ -502,8 +520,18 @@ export function PatternWorkspace({
           </button>
           <button className="primary-button" type="button" onClick={exportSvg}>
             <Download size={17} />
-            Exporter SVG
+            Exporter patron SVG
           </button>
+          {canvasSvgSnapshot ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => downloadSvgSnapshotAsPng(canvasSvgSnapshot)}
+            >
+              <Image size={17} />
+              Exporter vue finale PNG
+            </button>
+          ) : null}
           <button className="secondary-button" type="button" onClick={resetPatternView}>
             <RotateCcw size={17} />
             Reset vue
@@ -766,7 +794,6 @@ export function PatternWorkspace({
           onPointerMove={handlePreviewPointerMove}
           onPointerUp={handlePreviewPointerUp}
           onPointerCancel={handlePreviewPointerUp}
-          onWheel={handlePreviewWheel}
         >
           <rect className="pattern-background" width="100%" height="100%" />
 

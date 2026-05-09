@@ -40,6 +40,31 @@ function rectangularSeamAllowancePath(
   );
 }
 
+function segmentMarkAnnotations(
+  xPositions: number[],
+  depth: number,
+  seamAllowanceMm: number,
+): PatternAnnotation[] {
+  const tickDepth = Math.min(5, seamAllowanceMm);
+
+  return xPositions.flatMap((x) => [
+    {
+      type: 'segment-mark' as const,
+      points: [
+        { x, y: -seamAllowanceMm },
+        { x, y: -seamAllowanceMm + tickDepth },
+      ],
+    },
+    {
+      type: 'segment-mark' as const,
+      points: [
+        { x, y: depth + seamAllowanceMm },
+        { x, y: depth + seamAllowanceMm - tickDepth },
+      ],
+    },
+  ]);
+}
+
 function makeGussetPiece(
   id: string,
   label: string,
@@ -48,6 +73,7 @@ function makeGussetPiece(
   seamAllowanceMm: number,
   extraAnnotations: PatternAnnotation[] = [],
   seamlessEdges: SeamlessEdge[] = [],
+  segmentBreakXPositions: number[] = [],
 ): PatternPiece {
   const referencePath = rectangle(length, depth);
   const path =
@@ -77,6 +103,7 @@ function makeGussetPiece(
           { x: length, y: depth / 2 },
         ],
       },
+      ...segmentMarkAnnotations(segmentBreakXPositions, depth, seamAllowanceMm),
       ...extraAnnotations,
     ],
   };
@@ -216,6 +243,19 @@ function cablePassDistanceOnSegment(points: Point[], cablePass: CablePassOptions
   return clamp(cablePass.distanceFromSegmentStartMm ?? length / 2, 0, length);
 }
 
+function internalSegmentBreakPositions(points: Point[], section: GussetSection): number[] {
+  const positions: number[] = [];
+  let accumulated = 0;
+
+  for (let offset = 0; offset < section.segmentCount - 1; offset++) {
+    const segmentIndex = (section.startSegmentIndex + offset) % points.length;
+    accumulated += segmentLength(points[segmentIndex], points[(segmentIndex + 1) % points.length]);
+    positions.push(accumulated);
+  }
+
+  return positions;
+}
+
 function makeGussetPiecesForSection(
   section: GussetSection,
   index: number,
@@ -236,6 +276,7 @@ function makeGussetPiecesForSection(
     cablePass && segmentCount > 0
       ? Math.trunc(clamp(cablePass.segmentIndex, 0, segmentCount - 1))
       : -1;
+  const breakPositions = internalSegmentBreakPositions(points, section);
 
   if (
     !cablePass?.enabled ||
@@ -250,6 +291,9 @@ function makeGussetPiecesForSection(
         section.length,
         parameters.bagDepthMm,
         parameters.seamAllowanceMm,
+        [],
+        [],
+        breakPositions,
       ),
     ];
   }
@@ -271,6 +315,7 @@ function makeGussetPiecesForSection(
         parameters.seamAllowanceMm,
         [],
         ['right'],
+        breakPositions.filter((x) => x > 0 && x < beforeLength),
       ),
     );
   }
@@ -285,6 +330,7 @@ function makeGussetPiecesForSection(
         parameters.seamAllowanceMm,
         [],
         ['left'],
+        breakPositions.filter((x) => x > distanceToPass).map((x) => x - distanceToPass),
       ),
     );
   }

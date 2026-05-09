@@ -14,8 +14,11 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   CirclePlus,
   Crosshair,
+  Download,
   Droplets,
   FlipHorizontal,
   ImagePlus,
@@ -123,7 +126,40 @@ type SceneSnapshot = {
   isClosed: boolean;
 };
 
-type AppMode = 'trace' | 'zip-setup' | 'pattern';
+type AppMode = 'trace' | 'horizontal-tube' | 'zip-select' | 'gusset' | 'cable-pass' | 'pattern';
+
+const STEP_ORDER: AppMode[] = ['trace', 'horizontal-tube', 'zip-select', 'gusset', 'cable-pass', 'pattern'];
+
+type StepHistory = { past: SceneSnapshot[]; future: SceneSnapshot[] };
+
+function isZipCanvasMode(m: AppMode): boolean {
+  return m === 'horizontal-tube' || m === 'zip-select' || m === 'gusset' || m === 'cable-pass';
+}
+
+function segmentDeviationFromHorizontal(a: Point, b: Point): number {
+  const angle = Math.atan2(b.y - a.y, b.x - a.x);
+  // sin(angle) = 0 when perfectly horizontal (0° or ±180°)
+  return Math.abs(Math.sin(angle));
+}
+
+function isTracePerfectlyHorizontal(pts: Point[], closed: boolean): boolean {
+  const n = pts.length;
+  if (n < 2) return true;
+  let topSegIdx = 0;
+  let minAvgY = Infinity;
+  const limit = closed ? n : n - 1;
+  for (let i = 0; i < limit; i++) {
+    const j = (i + 1) % n;
+    const avgY = (pts[i].y + pts[j].y) / 2;
+    if (avgY < minAvgY) {
+      minAvgY = avgY;
+      topSegIdx = i;
+    }
+  }
+  const a = pts[topSegIdx];
+  const b = pts[(topSegIdx + 1) % n];
+  return segmentDeviationFromHorizontal(a, b) < 0.0001;
+}
 
 type FaceKey = 'faceA' | 'faceB';
 
@@ -232,6 +268,38 @@ function pointCentroid(points: Point[]): Point {
   };
 }
 
+export function downloadSvgSnapshotAsPng(svgStr: string) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgStr, 'image/svg+xml');
+  const svgEl = doc.documentElement;
+  const vw = parseFloat(svgEl.getAttribute('width') ?? '800');
+  const vh = parseFloat(svgEl.getAttribute('height') ?? '600');
+
+  const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vw * 2);
+    canvas.height = Math.round(vh * 2);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) { URL.revokeObjectURL(url); return; }
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob((pngBlob) => {
+      if (!pngBlob) return;
+      const pngUrl = URL.createObjectURL(pngBlob);
+      const link = document.createElement('a');
+      link.href = pngUrl;
+      link.download = 'cadre-vue-finale.png';
+      link.click();
+      URL.revokeObjectURL(pngUrl);
+    }, 'image/png');
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+}
+
 export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -258,6 +326,9 @@ export default function App() {
   const [historyPast, setHistoryPast] = useState<SceneSnapshot[]>([]);
   const [historyFuture, setHistoryFuture] = useState<SceneSnapshot[]>([]);
   const [status, setStatus] = useState('Importez une photo, puis cliquez dans la zone pour tracer.');
+  const [traceExpanded, setTraceExpanded] = useState(false);
+  const [stepHistories, setStepHistories] = useState<Partial<Record<AppMode, StepHistory>>>({});
+  const [canvasSvgSnapshot, setCanvasSvgSnapshot] = useState<string | null>(null);
 
   const makeSceneSnapshot = useCallback(
     (): SceneSnapshot => ({
@@ -396,10 +467,10 @@ export default function App() {
     [manualGussetBreaks],
   );
   const isManualGussetSetup =
-    mode === 'zip-setup' && patternParameters.gusset.splitMode === 'manual';
+    mode === 'gusset' && patternParameters.gusset.splitMode === 'manual';
   const cablePassSegmentIndex = patternParameters.gusset.cablePass?.segmentIndex ?? 2;
   const canSelectCablePassSegment =
-    mode === 'zip-setup' && patternParameters.gusset.cablePass?.enabled;
+    mode === 'cable-pass' && (patternParameters.gusset.cablePass?.enabled ?? false);
   const cablePassSegmentLengthMm = useMemo(() => {
     if (points.length < 2 || cablePassSegmentIndex < 0 || cablePassSegmentIndex >= segmentCount) {
       return 0;
@@ -410,7 +481,7 @@ export default function App() {
     return segmentLengthInMm(points[cablePassSegmentIndex], points[endIndex], mmPerUnit);
   }, [cablePassSegmentIndex, isClosed, mmPerUnit, points, segmentCount]);
   const zipPreviews = useMemo(() => {
-    if (mode !== 'zip-setup' || !isClosed || !traceBounds) {
+    if (!isZipCanvasMode(mode) || !isClosed || !traceBounds) {
       return [];
     }
 
@@ -683,8 +754,11 @@ export default function App() {
   }
 
   function handleWorkspacePointerDown(event: PointerEvent<SVGSVGElement>) {
-    if (event.button !== 0 && event.button !== 2) {
+    if (event.button !== 0 && event.button !== 1 && event.button !== 2) {
       return;
+    }
+    if (event.button === 1) {
+      event.preventDefault();
     }
 
     setContextMenu(null);
@@ -912,23 +986,22 @@ export default function App() {
     }
   }
 
-  function handleWheel(event: React.WheelEvent<SVGSVGElement>) {
-    event.preventDefault();
-    setContextMenu(null);
-    const rect = svgRef.current?.getBoundingClientRect();
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
 
-    if (!rect) {
-      return;
+    function handleWheel(event: WheelEvent) {
+      event.preventDefault();
+      setContextMenu(null);
+      const rect = svg!.getBoundingClientRect();
+      const screenPoint = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      const zoomFactor = event.deltaY < 0 ? 1.12 : 0.88;
+      setView((current) => zoomAtScreenPoint(current, screenPoint, current.scale * zoomFactor));
     }
 
-    const screenPoint = {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-    };
-    const zoomFactor = event.deltaY < 0 ? 1.12 : 0.88;
-
-    setView((current) => zoomAtScreenPoint(current, screenPoint, current.scale * zoomFactor));
-  }
+    svg.addEventListener('wheel', handleWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', handleWheel);
+  }, [mode]);
 
   function selectSegment(startIndex: number, event: PointerEvent<SVGLineElement>) {
     event.stopPropagation();
@@ -1129,30 +1202,89 @@ export default function App() {
     setStatus('Tracé réinitialisé. Cliquez dans la zone pour ajouter un point.');
   }
 
+  function transitionStep(targetMode: AppMode, forward: boolean) {
+    const currentHistory: StepHistory = { past: historyPast, future: historyFuture };
+
+    setStepHistories((prev) => {
+      const next: Partial<Record<AppMode, StepHistory>> = { ...prev, [mode]: currentHistory };
+      // Going backward: clear histories of all steps after target (they're potentially invalidated)
+      if (!forward) {
+        const targetIdx = STEP_ORDER.indexOf(targetMode);
+        for (let i = targetIdx + 1; i < STEP_ORDER.length; i++) {
+          delete next[STEP_ORDER[i]];
+        }
+      }
+      return next;
+    });
+
+    // Restore the target step's saved history (or start fresh)
+    const targetHistory = stepHistories[targetMode] ?? { past: [], future: [] };
+    setHistoryPast(targetHistory.past);
+    setHistoryFuture(targetHistory.future);
+    setMode(targetMode);
+  }
+
   function validateTrace() {
     try {
       const shape = createValidatedBagShape(points, isClosed, mmPerUnit);
 
       setValidatedShape(shape);
-      setMode('zip-setup');
       setSelectedSegment(null);
       setLengthInput('');
       setContextMenu(null);
       setPreviewPoint(null);
-      setStatus('Tracé validé. Configurez les zips sur la photo avant de générer le patron.');
+      setTraceExpanded(false);
+
+      if (isTracePerfectlyHorizontal(points, isClosed)) {
+        transitionStep('zip-select', true);
+        setStatus('Tracé validé. Positionnez les zips sur les faces.');
+      } else {
+        transitionStep('horizontal-tube', true);
+        setStatus('Sélectionnez le segment du tube horizontal pour redresser le tracé.');
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Impossible de valider le tracé.');
     }
   }
 
   function returnToTrace() {
-    setMode('trace');
+    transitionStep('trace', false);
     setStatus('Retour au tracé. Modifiez la forme puis validez à nouveau.');
   }
 
-  function returnToZipSetup() {
-    setMode('zip-setup');
-    setStatus('Retour à la configuration des zips.');
+  function confirmHorizontalTube() {
+    if (selectedSegmentPoints) {
+      straightenSelectedSegment();
+    }
+    setSelectedSegment(null);
+    transitionStep('zip-select', true);
+    setStatus('Positionnez les zips sur les faces.');
+  }
+
+  function proceedToGusset() {
+    transitionStep('gusset', true);
+    setSelectedSegment(null);
+    setStatus('Configurez la découpe du soufflet.');
+  }
+
+  function returnToHorizontalTube() {
+    transitionStep('horizontal-tube', false);
+    setStatus('Sélectionnez le segment du tube horizontal.');
+  }
+
+  function returnToZipSelect() {
+    transitionStep('zip-select', false);
+    setStatus('Positionnez les zips sur les faces.');
+  }
+
+  function proceedToCablePass() {
+    transitionStep('cable-pass', true);
+    setStatus('Configurez le passe cable si nécessaire.');
+  }
+
+  function returnToGusset() {
+    transitionStep('gusset', false);
+    setStatus('Configurez la découpe du soufflet.');
   }
 
   function generatePatternStep() {
@@ -1160,12 +1292,82 @@ export default function App() {
       const shape = createValidatedBagShape(points, isClosed, mmPerUnit);
 
       setValidatedShape(shape);
-      setMode('pattern');
+      setCanvasSvgSnapshot(buildCanvasSvgSnapshot());
+      transitionStep('pattern', true);
       setStatus('Les pièces de patronnage sont générées.');
     } catch (error) {
       setMode('trace');
       setStatus(error instanceof Error ? error.message : 'Impossible de générer le patron.');
     }
+  }
+
+  function returnToCablePass() {
+    transitionStep('cable-pass', false);
+    setStatus('Configurez le passe cable si nécessaire.');
+  }
+
+  function buildCanvasSvgSnapshot(): string | null {
+    const svg = svgRef.current;
+    if (!svg || !traceBounds) return null;
+
+    const W = traceBounds.maxX - traceBounds.minX;
+    const padWorld = 30;
+    const leftWorld = isClosed
+      ? traceBounds.minX - 30 - W - padWorld
+      : traceBounds.minX - padWorld;
+    const rightWorld = traceBounds.maxX + padWorld;
+    const topWorld = traceBounds.minY - padWorld;
+    const bottomWorld = traceBounds.maxY + padWorld;
+
+    const vx = leftWorld * view.scale + view.offsetX;
+    const vy = topWorld * view.scale + view.offsetY;
+    const vw = (rightWorld - leftWorld) * view.scale;
+    const vh = (bottomWorld - topWorld) * view.scale;
+
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute('viewBox', `${vx} ${vy} ${vw} ${vh}`);
+    clone.setAttribute('width', String(vw));
+    clone.setAttribute('height', String(vh));
+
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = `
+      .workspace-hit-area { fill: #f4f5f6; }
+      .shape-fill { fill: rgba(31,111,91,0.12); stroke: none; }
+      .shape-line { fill: none; stroke: #1f6f5b; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+      .shape-fill-a { fill: rgba(37,99,168,0.10); stroke: none; }
+      .shape-line-a { fill: none; stroke: #2563a8; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+      .face-canvas-label { font-weight: 700; font-family: sans-serif; }
+      .face-canvas-label--a { fill: #2563a8; }
+      .face-canvas-label--b { fill: #26734d; }
+      .zip-preview.faceA { color: #2563a8; }
+      .zip-preview.faceB { color: #26734d; }
+      .zip-preview-cutout { stroke: currentColor; opacity: 0.16; stroke-linecap: round; }
+      .zip-preview-axis { stroke: currentColor; stroke-width: 2; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+      .zip-preview.faceB .zip-preview-axis { stroke-dasharray: 7 5; }
+      .zip-preview-label { fill: currentColor; stroke: #ffffff; paint-order: stroke fill; stroke-width: 3; font-weight: 800; font-family: sans-serif; }
+      .zip-preview-hit-area { display: none; }
+      .segment-hit-area { display: none; }
+      .cable-pass-segment { display: none; }
+      .point-node { fill: #ffffff; stroke: #1f6f5b; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+      .point-node.gusset-break { fill: #e85d04; stroke: #e85d04; }
+      .cable-pass-marker { fill: none; stroke: #7c3aed; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+      .trace-dimensions { display: none; }
+      .scene-overlay-hit-area { display: none; }
+      .scene-overlay-selection { display: none; }
+      .bladder-path { fill: none; stroke: #4b535f; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
+      .bladder-path.outline { fill: rgba(90,102,116,0.08); stroke: #26313d; stroke-width: 1.6; }
+      .bladder-path.detail, .bladder-path.hose { stroke: #7a8491; stroke-width: 0.9; }
+      .bladder-path.fill-cap { fill: rgba(255,255,255,0.72); stroke: #626a76; stroke-width: 1; }
+      .bladder-path.port { stroke: #626a76; stroke-width: 0.95; }
+    `;
+    clone.insertBefore(style, clone.firstChild);
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  function exportCanvasPng() {
+    const svgStr = buildCanvasSvgSnapshot();
+    if (!svgStr) return;
+    downloadSvgSnapshotAsPng(svgStr);
   }
 
   function renderZipSetupFaceControls(faceKey: FaceKey, label: string) {
@@ -1233,8 +1435,9 @@ export default function App() {
         shape={validatedShape}
         parameters={patternParameters}
         onParametersChange={setPatternParameters}
-        onBackToTrace={returnToZipSetup}
-        backButtonLabel="Retour aux zips"
+        onBackToTrace={returnToCablePass}
+        backButtonLabel="Retour au passe cable"
+        canvasSvgSnapshot={canvasSvgSnapshot ?? undefined}
       />
     );
   }
@@ -1243,72 +1446,91 @@ export default function App() {
     <main className="app-shell">
       <aside className="tool-panel" aria-label="Outils">
         <div className="brand-block">
-          {mode === 'zip-setup' ? <Scissors size={22} /> : <Crosshair size={22} />}
+          {isZipCanvasMode(mode) ? <Scissors size={22} /> : <Crosshair size={22} />}
           <div>
             <h1>Cadre Pattern</h1>
-            <p>{mode === 'zip-setup' ? 'Configuration patronnage' : 'POC tracé sacoche'}</p>
+            <p>{mode === 'trace' ? 'POC tracé sacoche' : 'Configuration patronnage'}</p>
+          </div>
+          <div className="history-controls">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={undo}
+              disabled={historyPast.length === 0}
+              title="Annuler (Ctrl+Z)"
+            >
+              <Undo2 size={15} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={redo}
+              disabled={historyFuture.length === 0}
+              title="Rétablir (Ctrl+Shift+Z)"
+            >
+              <Redo2 size={15} />
+            </button>
           </div>
         </div>
 
-        <section className="tool-section">
-          <div className="section-title">Photo</div>
-          <input
-            ref={fileInputRef}
-            className="hidden-input"
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            onChange={handleImageImport}
-          />
-          <button className="primary-button" type="button" onClick={() => fileInputRef.current?.click()}>
-            <ImagePlus size={18} />
-            Importer
-          </button>
-
-          <label className="field">
-            <span>Opacité</span>
-            <input
-              type="range"
-              min="0.05"
-              max="1"
-              step="0.05"
-              value={image?.opacity ?? 0.55}
-              disabled={!image}
-              onChange={(event) =>
-                setImage((current) =>
-                  current ? { ...current, opacity: Number(event.target.value) } : current,
-                )
-              }
-            />
-          </label>
-        </section>
-
-        <section className="tool-section">
-          <div className="section-title">{mode === 'zip-setup' ? 'Tracé validé' : 'Tracé'}</div>
-          <div className="metric-row">
-            <span>Points</span>
-            <strong>{points.length}</strong>
+        {isZipCanvasMode(mode) ? (
+          <div className="step-indicator">
+            <span className={`step-dot${mode === 'horizontal-tube' ? ' active' : ' done'}`} />
+            <span className={`step-dot${mode === 'zip-select' ? ' active' : mode === 'horizontal-tube' ? '' : ' done'}`} />
+            <span className={`step-dot${mode === 'gusset' ? ' active' : mode === 'cable-pass' ? ' done' : ''}`} />
+            <span className={`step-dot${mode === 'cable-pass' ? ' active' : ''}`} />
+            <span className="step-label">
+              {mode === 'horizontal-tube' && 'Tube horizontal'}
+              {mode === 'zip-select' && 'Zips'}
+              {mode === 'gusset' && 'Soufflet'}
+              {mode === 'cable-pass' && 'Passe cable'}
+            </span>
           </div>
-          <div className="metric-row">
-            <span>État</span>
-            <strong>{isClosed ? 'Fermé' : 'Ouvert'}</strong>
-          </div>
-          {mode === 'zip-setup' ? (
-            <>
+        ) : null}
+
+        {mode === 'trace' ? (
+          <>
+            <section className="tool-section">
+              <div className="section-title">Photo</div>
+              <input
+                ref={fileInputRef}
+                className="hidden-input"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleImageImport}
+              />
+              <button className="primary-button" type="button" onClick={() => fileInputRef.current?.click()}>
+                <ImagePlus size={18} />
+                Importer
+              </button>
+              <label className="field">
+                <span>Opacité</span>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="1"
+                  step="0.05"
+                  value={image?.opacity ?? 0.55}
+                  disabled={!image}
+                  onChange={(event) =>
+                    setImage((current) =>
+                      current ? { ...current, opacity: Number(event.target.value) } : current,
+                    )
+                  }
+                />
+              </label>
+            </section>
+
+            <section className="tool-section">
+              <div className="section-title">Tracé</div>
               <div className="metric-row">
-                <span>Hauteur</span>
-                <strong>{formatMm(traceHeightMm)} mm</strong>
+                <span>Points</span>
+                <strong>{points.length}</strong>
               </div>
-              <button className="secondary-button" type="button" onClick={returnToTrace}>
-                <ArrowLeft size={17} />
-                Retour au tracé
-              </button>
-              <button className="primary-button" type="button" onClick={generatePatternStep}>
-                <ArrowRight size={18} />
-                Générer patron
-              </button>
-            </>
-          ) : (
-            <>
+              <div className="metric-row">
+                <span>État</span>
+                <strong>{isClosed ? 'Fermé' : 'Ouvert'}</strong>
+              </div>
               <label className="checkbox-field">
                 <input
                   type="checkbox"
@@ -1317,26 +1539,6 @@ export default function App() {
                 />
                 Afficher dimensions
               </label>
-              <div className="button-row">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={undo}
-                  disabled={historyPast.length === 0}
-                >
-                  <Undo2 size={17} />
-                  Retour
-                </button>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={redo}
-                  disabled={historyFuture.length === 0}
-                >
-                  <Redo2 size={17} />
-                  Suivant
-                </button>
-              </div>
               <button className="secondary-button" type="button" onClick={clearTrace} disabled={points.length === 0}>
                 <RotateCcw size={17} />
                 Réinitialiser
@@ -1350,327 +1552,321 @@ export default function App() {
                 <CheckCircle2 size={18} />
                 Valider le tracé
               </button>
-            </>
-          )}
-        </section>
+            </section>
 
-        <section className="tool-section">
-          <div className="section-title">Navigation</div>
-          <button className="secondary-button" type="button" onClick={resetView}>
-            <ZoomIn size={17} />
-            Reset vue
-          </button>
-          <div className="hint-list">
-            {mode === 'trace' ? (
-              <>
-                <span>
-                  <MousePointer2 size={15} /> Clic fond : point
-                </span>
-                <span>
-                  <MousePointer2 size={15} /> Alt + clic point : supprimer
-                </span>
-                <span>
-                  <MousePointer2 size={15} /> Clic droit : menu
-                </span>
-                <span>
-                  <MousePointer2 size={15} /> Ctrl+Z / Ctrl+Shift+Z
-                </span>
-                <span>
-                  <MousePointer2 size={15} /> Double-clic segment : insérer
-                </span>
-              </>
-            ) : (
-              <>
-                <span>
-                  <MousePointer2 size={15} /> Glisser une ligne zip : hauteur
-                </span>
-                {isManualGussetSetup ? (
-                  <span>
-                    <MousePointer2 size={15} /> Clic point : coupe soufflet
-                  </span>
-                ) : null}
-              </>
-            )}
-            <span>
-              <Move size={15} /> Glisser fond : pan
-            </span>
-            <span>
-              <ZoomIn size={15} /> Molette : zoom
-            </span>
-          </div>
-        </section>
+            <section className="tool-section">
+              <div className="section-title">Calibration</div>
+              {selectedSegmentPoints && currentSelectedLengthMm !== null ? (
+                <form className="calibration-form" onSubmit={applyCalibration}>
+                  <div className="metric-row">
+                    <span>Segment</span>
+                    <strong>
+                      {selectedSegmentPoints.start + 1}-{selectedSegmentPoints.end + 1}
+                    </strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>Longueur</span>
+                    <strong>{formatMm(currentSelectedLengthMm)} mm</strong>
+                  </div>
+                  <label className="field">
+                    <span>Longueur réelle</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.1"
+                      value={lengthInput}
+                      onChange={(event) => setLengthInput(event.target.value)}
+                    />
+                  </label>
+                  <button className="primary-button" type="submit">
+                    <Ruler size={18} />
+                    Appliquer
+                  </button>
+                  <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
+                    <AlignHorizontalSpaceAround size={18} />
+                    Remettre droit
+                  </button>
+                </form>
+              ) : (
+                <p className="empty-state">Sélectionnez un segment du tracé pour saisir sa longueur en mm.</p>
+              )}
+            </section>
+          </>
+        ) : (
+          <>
+            <button
+              className="accordion-toggle"
+              type="button"
+              onClick={() => setTraceExpanded((v) => !v)}
+            >
+              {traceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              Tracé — {points.length} pts · {formatMm(traceHeightMm)} mm
+            </button>
+            {traceExpanded ? (
+              <div className="accordion-body">
+                <section className="tool-section">
+                  <div className="section-title">Photo</div>
+                  <input
+                    ref={fileInputRef}
+                    className="hidden-input"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleImageImport}
+                  />
+                  <button className="primary-button" type="button" onClick={() => fileInputRef.current?.click()}>
+                    <ImagePlus size={18} />
+                    Importer
+                  </button>
+                  <label className="field">
+                    <span>Opacité</span>
+                    <input
+                      type="range"
+                      min="0.05"
+                      max="1"
+                      step="0.05"
+                      value={image?.opacity ?? 0.55}
+                      disabled={!image}
+                      onChange={(event) =>
+                        setImage((current) =>
+                          current ? { ...current, opacity: Number(event.target.value) } : current,
+                        )
+                      }
+                    />
+                  </label>
+                </section>
+                <section className="tool-section">
+                  <div className="section-title">Tracé validé</div>
+                  <div className="metric-row">
+                    <span>Points</span>
+                    <strong>{points.length}</strong>
+                  </div>
+                  <div className="metric-row">
+                    <span>Hauteur</span>
+                    <strong>{formatMm(traceHeightMm)} mm</strong>
+                  </div>
+                  <button className="secondary-button" type="button" onClick={returnToTrace}>
+                    <ArrowLeft size={17} />
+                    Retour au tracé
+                  </button>
+                </section>
+              </div>
+            ) : null}
+          </>
+        )}
 
-        {mode === 'trace' ? (
+        {mode === 'horizontal-tube' ? (
           <section className="tool-section">
-            <div className="section-title">Calibration</div>
-            {selectedSegmentPoints && currentSelectedLengthMm !== null ? (
-              <form className="calibration-form" onSubmit={applyCalibration}>
+            <div className="section-title">Tube horizontal</div>
+            {selectedSegmentPoints ? (
+              <>
                 <div className="metric-row">
                   <span>Segment</span>
-                  <strong>
-                    {selectedSegmentPoints.start + 1}-{selectedSegmentPoints.end + 1}
-                  </strong>
+                  <strong>{selectedSegmentPoints.start + 1}–{selectedSegmentPoints.end + 1}</strong>
                 </div>
                 <div className="metric-row">
-                  <span>Longueur</span>
-                  <strong>{formatMm(currentSelectedLengthMm)} mm</strong>
+                  <span>Déviation</span>
+                  <strong>
+                    {Math.round(
+                      Math.asin(
+                        segmentDeviationFromHorizontal(
+                          selectedSegmentPoints.a,
+                          selectedSegmentPoints.b,
+                        ),
+                      ) * 180 / Math.PI * 10,
+                    ) / 10}°
+                  </strong>
                 </div>
-                <label className="field">
-                  <span>Longueur réelle</span>
-                  <input
-                    type="number"
-                    min="1"
-                    step="0.1"
-                    value={lengthInput}
-                    onChange={(event) => setLengthInput(event.target.value)}
-                  />
-                </label>
-                <button className="primary-button" type="submit">
-                  <Ruler size={18} />
-                  Appliquer
-                </button>
-                <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
+                <button className="primary-button" type="button" onClick={confirmHorizontalTube}>
                   <AlignHorizontalSpaceAround size={18} />
-                  Remettre droit
+                  Redresser et continuer
                 </button>
-              </form>
+              </>
             ) : (
-              <p className="empty-state">Sélectionnez un segment du tracé pour saisir sa longueur en mm.</p>
+              <p className="empty-state">Cliquez sur le segment du tube supérieur horizontal pour redresser le tracé.</p>
             )}
+            <button className="secondary-button" type="button" onClick={confirmHorizontalTube}>
+              Passer
+            </button>
           </section>
         ) : null}
 
-        {mode === 'zip-setup' ? (
+        {mode === 'zip-select' ? (
           <>
-            <section className="tool-section">
-              <div className="section-title">Découpe zip</div>
-              <label className="field">
-                <span>Hauteur découpe zip</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={patternParameters.zipperCutoutHeightMm}
-                  onChange={(event) =>
-                    updatePatternParameters({ zipperCutoutHeightMm: updateNumber(event.target.value) })
-                  }
-                />
-              </label>
-            </section>
             {renderZipSetupFaceControls('faceA', 'Face A')}
             {renderZipSetupFaceControls('faceB', 'Face B')}
-            <section className="tool-section">
-              <div className="section-title">Soufflet</div>
-              {(() => {
-                const cablePass = patternParameters.gusset.cablePass ?? {
-                  enabled: false,
-                  segmentIndex: 2,
-                  distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-                  overlapMm: 10,
-                };
-                const distanceFromTopMm =
-                  cablePass.distanceFromTopMm ??
-                  cablePass.distanceFromSegmentStartMm ??
-                  DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
-
-                return (
-                  <>
-                    <label className="checkbox-field">
-                      <input
-                        type="checkbox"
-                        checked={cablePass.enabled}
-                        onChange={(event) => updateCablePass({ enabled: event.target.checked })}
-                      />
-                      <span>Passe cable down tube</span>
-                    </label>
-                    {cablePass.enabled ? (
-                      <>
-                        <label className="field">
-                          <span>Segment passe cable</span>
-                          <input
-                            type="number"
-                            min="1"
-                            max={points.length}
-                            step="1"
-                            value={cablePass.segmentIndex + 1}
-                            onChange={(event) =>
-                              updateCablePass({
-                                segmentIndex: Math.max(0, updateNumber(event.target.value) - 1),
-                              })
-                            }
-                          />
-                        </label>
-                        <label className="field">
-                          <span>Distance depuis haut du segment</span>
-                          <input
-                            type="number"
-                            min="0"
-                            max={Math.max(0, Math.round(cablePassSegmentLengthMm * 10) / 10)}
-                            step="1"
-                            value={Math.round(distanceFromTopMm * 10) / 10}
-                            onChange={(event) =>
-                              updateCablePass({ distanceFromTopMm: updateNumber(event.target.value) })
-                            }
-                          />
-                        </label>
-                        <label className="field">
-                          <span>Chevauchement passe cable</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={cablePass.overlapMm}
-                            onChange={(event) =>
-                              updateCablePass({ overlapMm: updateNumber(event.target.value) })
-                            }
-                          />
-                        </label>
-                      </>
-                    ) : null}
-                  </>
-                );
-              })()}
-              <label className="field">
-                <span>Découpe</span>
-                <select
-                  value={patternParameters.gusset.splitMode}
-                  onChange={(event) =>
-                    updateGusset({
-                      splitMode: event.target.value as PatternParameters['gusset']['splitMode'],
-                    })
-                  }
-                >
-                  <option value="single-piece">Une pièce</option>
-                  <option value="one-piece-per-tube">Une pièce par tube</option>
-                  <option value="manual">Manuelle</option>
-                </select>
-              </label>
-              {patternParameters.gusset.splitMode === 'one-piece-per-tube' ? (
-                <label className="field">
-                  <span>Angle changement pièce</span>
-                  <input
-                    type="number"
-                    min="1"
-                    max="180"
-                    step="1"
-                    value={patternParameters.gusset.angleBreakThresholdDeg}
-                    onChange={(event) =>
-                      updateGusset({
-                        angleBreakThresholdDeg: updateNumber(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-              ) : null}
-              {patternParameters.gusset.splitMode === 'manual' ? (
-                <>
-                  <div className="metric-row">
-                    <span>Points de coupe</span>
-                    <strong>{manualGussetBreaks.length}</strong>
-                  </div>
-                  <p className="empty-state">
-                    Cliquez sur les points du tracé pour couper le soufflet, ou sur un segment pour placer le passe cable.
-                  </p>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() =>
-                      setPatternParameters((current) => ({
-                        ...current,
-                        gusset: {
-                          ...current.gusset,
-                          manualBreakSegmentIndices: [],
-                        },
-                      }))
-                    }
-                    disabled={manualGussetBreaks.length === 0}
-                  >
-                    <Trash2 size={17} />
-                    Réinitialiser coupes
-                  </button>
-                </>
-              ) : null}
-            </section>
           </>
         ) : null}
 
-        <section className="tool-section">
-          <div className="section-title">Formes test</div>
-          <label className="field">
-            <span>Hydration bladder</span>
-            <select
-              value={overlayTemplateId}
-              onChange={(event) => setOverlayTemplateId(event.target.value)}
-            >
-              {HYDRATION_BLADDER_TEMPLATES.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button className="secondary-button" type="button" onClick={() => addOverlay(overlayTemplateId)}>
-            <Droplets size={17} />
-            Ajouter la forme
-          </button>
-          {selectedOverlay && selectedOverlayTemplate ? (
-            <div className="overlay-controls">
-              <div className="metric-row">
-                <span>Sélection</span>
-                <strong>{selectedOverlayTemplate.label}</strong>
-              </div>
-              <div className="metric-row">
-                <span>Taille</span>
-                <strong>
-                  {formatMm(selectedOverlay.width)} x {formatMm(selectedOverlay.height)} mm
-                </strong>
-              </div>
+        {mode === 'gusset' ? (
+          <section className="tool-section">
+            <div className="section-title">Soufflet</div>
+            <label className="field">
+              <span>Découpe</span>
+              <select
+                value={patternParameters.gusset.splitMode}
+                onChange={(event) =>
+                  updateGusset({
+                    splitMode: event.target.value as PatternParameters['gusset']['splitMode'],
+                  })
+                }
+              >
+                <option value="single-piece">Une pièce</option>
+                <option value="one-piece-per-tube">Une pièce par tube</option>
+                <option value="manual">Manuelle</option>
+              </select>
+            </label>
+            {patternParameters.gusset.splitMode === 'one-piece-per-tube' ? (
               <label className="field">
-                <span>Rotation</span>
+                <span>Angle changement pièce</span>
                 <input
                   type="number"
-                  step="5"
-                  value={Math.round((selectedOverlay.rotation * 180) / Math.PI)}
-                  onFocus={recordHistory}
+                  min="1"
+                  max="180"
+                  step="1"
+                  value={patternParameters.gusset.angleBreakThresholdDeg}
                   onChange={(event) =>
-                    updateSelectedOverlay({
-                      rotation: (Number(event.target.value) * Math.PI) / 180,
-                    })
+                    updateGusset({ angleBreakThresholdDeg: updateNumber(event.target.value) })
                   }
                 />
               </label>
-              <label className="field">
-                <span>Opacité</span>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="1"
-                  step="0.05"
-                  value={selectedOverlay.opacity}
-                  onPointerDown={recordHistory}
-                  onChange={(event) =>
-                    updateSelectedOverlay({
-                      opacity: Number(event.target.value),
-                    })
+            ) : null}
+            {patternParameters.gusset.splitMode === 'manual' ? (
+              <>
+                <div className="metric-row">
+                  <span>Points de coupe</span>
+                  <strong>{manualGussetBreaks.length}</strong>
+                </div>
+                <p className="empty-state">
+                  Cliquez sur les points du tracé pour placer les coupes du soufflet.
+                </p>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() =>
+                    setPatternParameters((current) => ({
+                      ...current,
+                      gusset: { ...current.gusset, manualBreakSegmentIndices: [] },
+                    }))
                   }
-                />
-              </label>
-              <button className="secondary-button" type="button" onClick={toggleSelectedOverlayMirror}>
-                <FlipHorizontal size={17} />
-                Miroir
-              </button>
-              <button className="secondary-button" type="button" onClick={deleteSelectedOverlay}>
-                <Trash2 size={17} />
-                Supprimer
-              </button>
-            </div>
-          ) : (
-            <p className="empty-state">Ajoutez une forme, puis glissez-la directement sur le tracé.</p>
-          )}
-        </section>
+                  disabled={manualGussetBreaks.length === 0}
+                >
+                  <Trash2 size={17} />
+                  Réinitialiser coupes
+                </button>
+              </>
+            ) : null}
+          </section>
+        ) : null}
+
+        {mode === 'cable-pass' ? (
+          <section className="tool-section">
+            <div className="section-title">Passe cable</div>
+            {(() => {
+              const cablePass = patternParameters.gusset.cablePass ?? {
+                enabled: false,
+                segmentIndex: 2,
+                distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
+                overlapMm: 10,
+              };
+              const distanceFromTopMm =
+                cablePass.distanceFromTopMm ??
+                cablePass.distanceFromSegmentStartMm ??
+                DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
+
+              return (
+                <>
+                  <label className="checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={cablePass.enabled}
+                      onChange={(event) => updateCablePass({ enabled: event.target.checked })}
+                    />
+                    <span>Passe cable down tube</span>
+                  </label>
+                  {cablePass.enabled ? (
+                    <>
+                      <p className="empty-state">
+                        Cliquez sur un segment du tracé pour le sélectionner.
+                      </p>
+                      <div className="metric-row">
+                        <span>Segment sélectionné</span>
+                        <strong>{cablePass.segmentIndex + 1}</strong>
+                      </div>
+                      <label className="field">
+                        <span>Distance depuis haut du segment</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max={Math.max(0, Math.round(cablePassSegmentLengthMm * 10) / 10)}
+                          step="1"
+                          value={Math.round(distanceFromTopMm * 10) / 10}
+                          onChange={(event) =>
+                            updateCablePass({ distanceFromTopMm: updateNumber(event.target.value) })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Chevauchement</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={cablePass.overlapMm}
+                          onChange={(event) =>
+                            updateCablePass({ overlapMm: updateNumber(event.target.value) })
+                          }
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                </>
+              );
+            })()}
+          </section>
+        ) : null}
+
+        {isZipCanvasMode(mode) ? (
+          <div className="step-nav">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={
+                mode === 'horizontal-tube' ? returnToTrace :
+                mode === 'zip-select' ? (isTracePerfectlyHorizontal(points, isClosed) ? returnToTrace : returnToHorizontalTube) :
+                mode === 'gusset' ? returnToZipSelect :
+                returnToGusset
+              }
+            >
+              <ArrowLeft size={17} />
+              Retour
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={
+                mode === 'horizontal-tube' ? confirmHorizontalTube :
+                mode === 'zip-select' ? proceedToGusset :
+                mode === 'gusset' ? proceedToCablePass :
+                generatePatternStep
+              }
+            >
+              {mode === 'cable-pass' ? (
+                <>
+                  <Download size={17} />
+                  Générer patron
+                </>
+              ) : (
+                <>
+                  Suivant
+                  <ArrowRight size={17} />
+                </>
+              )}
+            </button>
+          </div>
+        ) : null}
 
         <div className="status-line">
-          {mode === 'zip-setup' ? <Settings2 size={15} /> : null}
+          {isZipCanvasMode(mode) ? <Settings2 size={15} /> : null}
           {status}
         </div>
       </aside>
@@ -1678,12 +1874,11 @@ export default function App() {
       <section className="workspace">
         <svg
           ref={svgRef}
-          className={mode === 'zip-setup' ? 'editor-svg is-zip-setup' : 'editor-svg'}
+          className={isZipCanvasMode(mode) ? 'editor-svg is-zip-setup' : 'editor-svg'}
           onPointerDown={handleWorkspacePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onContextMenu={handleWorkspaceContextMenu}
-          onWheel={handleWheel}
         >
           <defs>
             <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
@@ -1801,6 +1996,17 @@ export default function App() {
 
             {points.length > 1 && (
               <>
+                {isZipCanvasMode(mode) && isClosed && traceBounds ? (() => {
+                  const gap = 30;
+                  const base = 2 * traceBounds.minX - gap;
+                  const faceAPts = points.map((p) => `${base - p.x},${p.y}`).join(' ');
+                  return (
+                    <g className="face-a-shape" pointerEvents="none">
+                      <polygon className="shape-fill-a" points={faceAPts} />
+                      <polygon className="shape-line-a" points={faceAPts} fill="none" />
+                    </g>
+                  );
+                })() : null}
                 {isClosed ? (
                   <polygon className="shape-fill" points={pointsToPolyline(points)} />
                 ) : null}
@@ -1966,11 +2172,23 @@ export default function App() {
             {zipPreviews.length > 0 ? (
               <g className="zip-previews">
                 {zipPreviews.map((preview) => {
-                  const labelOffset = (preview.faceKey === 'faceA' ? -14 : 16) / view.scale;
                   const cutoutHeight = Math.max(
                     patternParameters.zipperCutoutHeightMm / mmPerUnit,
                     1 / view.scale,
                   );
+                  const isFaceA = preview.faceKey === 'faceA';
+                  // Face A zips are mirrored onto the Face A shape placed to the left
+                  let lx1 = preview.x1;
+                  let lx2 = preview.x2;
+                  if (isFaceA && traceBounds) {
+                    const base = 2 * traceBounds.minX - 30;
+                    const mx1 = base - preview.x1;
+                    const mx2 = base - preview.x2;
+                    lx1 = Math.min(mx1, mx2);
+                    lx2 = Math.max(mx1, mx2);
+                  }
+                  const midX = (lx1 + lx2) / 2;
+                  const labelOffset = (isFaceA ? -14 : 16) / view.scale;
 
                   return (
                     <g
@@ -1979,23 +2197,23 @@ export default function App() {
                     >
                       <line
                         className="zip-preview-cutout"
-                        x1={preview.x1}
+                        x1={lx1}
                         y1={preview.y}
-                        x2={preview.x2}
+                        x2={lx2}
                         y2={preview.y}
                         strokeWidth={cutoutHeight}
                       />
                       <line
                         className="zip-preview-axis"
-                        x1={preview.x1}
+                        x1={lx1}
                         y1={preview.y}
-                        x2={preview.x2}
+                        x2={lx2}
                         y2={preview.y}
                         vectorEffect="non-scaling-stroke"
                       />
                       <text
                         className="zip-preview-label"
-                        x={(preview.x1 + preview.x2) / 2}
+                        x={midX}
                         y={preview.y + labelOffset}
                         fontSize={12 / view.scale}
                         strokeWidth={4 / view.scale}
@@ -2004,24 +2222,63 @@ export default function App() {
                       >
                         {preview.label} - {formatMm(preview.valueMm)} mm
                       </text>
-                      <line
-                        className="zip-preview-hit-area"
-                        x1={preview.x1}
-                        y1={preview.y}
-                        x2={preview.x2}
-                        y2={preview.y}
-                        vectorEffect="non-scaling-stroke"
-                        onPointerDown={(event) =>
-                          handleZipPointerDown(preview.faceKey, preview.zipperIndex, event)
-                        }
-                      />
+                      {mode === 'zip-select' ? (
+                        <line
+                          className="zip-preview-hit-area"
+                          x1={lx1}
+                          y1={preview.y}
+                          x2={lx2}
+                          y2={preview.y}
+                          vectorEffect="non-scaling-stroke"
+                          onPointerDown={(event) =>
+                            handleZipPointerDown(preview.faceKey, preview.zipperIndex, event)
+                          }
+                        />
+                      ) : null}
                     </g>
                   );
                 })}
               </g>
             ) : null}
 
-            {mode === 'trace' ? Array.from({ length: segmentCount }, (_, index) => {
+            {isZipCanvasMode(mode) && isClosed && traceBounds ? (() => {
+              const gap = 30;
+              const w = traceBounds.maxX - traceBounds.minX;
+              const labelY = traceBounds.minY - 10 / view.scale;
+              const fs = 13 / view.scale;
+              // Face A center = minX - gap - w/2
+              const faceACenterX = traceBounds.minX - gap - w / 2;
+              // Face B center = (minX + maxX) / 2
+              const faceBCenterX = (traceBounds.minX + traceBounds.maxX) / 2;
+              return (
+                <>
+                  <text
+                    className="face-canvas-label face-canvas-label--a"
+                    x={faceACenterX}
+                    y={labelY}
+                    fontSize={fs}
+                    textAnchor="middle"
+                    dominantBaseline="auto"
+                    pointerEvents="none"
+                  >
+                    Face A
+                  </text>
+                  <text
+                    className="face-canvas-label face-canvas-label--b"
+                    x={faceBCenterX}
+                    y={labelY}
+                    fontSize={fs}
+                    textAnchor="middle"
+                    dominantBaseline="auto"
+                    pointerEvents="none"
+                  >
+                    Face B
+                  </text>
+                </>
+              );
+            })() : null}
+
+            {(mode === 'trace' || mode === 'horizontal-tube') ? Array.from({ length: segmentCount }, (_, index) => {
               const endIndex = segmentEndIndex(index, points.length, isClosed);
               const a = points[index];
               const b = points[endIndex];
@@ -2037,8 +2294,8 @@ export default function App() {
                   y2={b.y}
                   vectorEffect="non-scaling-stroke"
                   onPointerDown={(event) => selectSegment(index, event)}
-                  onDoubleClick={(event) => insertPointInSegment(index, event)}
-                  onContextMenu={(event) => openSegmentContextMenu(index, event)}
+                  onDoubleClick={mode === 'trace' ? (event) => insertPointInSegment(index, event) : undefined}
+                  onContextMenu={mode === 'trace' ? (event) => openSegmentContextMenu(index, event) : undefined}
                 />
               );
             }) : null}
@@ -2085,7 +2342,7 @@ export default function App() {
                 key={`${point.x}-${point.y}-${index}`}
                 className={[
                   index === 0 && !isClosed && points.length >= 3 ? 'point-node close-ready' : 'point-node',
-                  mode === 'zip-setup' ? 'locked' : '',
+                  isZipCanvasMode(mode) ? 'locked' : '',
                   isManualGussetSetup ? 'gusset-selectable' : '',
                   manualGussetBreakSet.has(index) ? 'gusset-break' : '',
                 ]
@@ -2105,6 +2362,28 @@ export default function App() {
                 onContextMenu={mode === 'trace' ? (event) => openPointContextMenu(index, event) : undefined}
               />
             ))}
+
+            {isZipCanvasMode(mode) && patternParameters.gusset.cablePass?.enabled && isClosed ? (() => {
+              const cp = patternParameters.gusset.cablePass!;
+              const segIdx = cp.segmentIndex;
+              if (segIdx >= points.length) return null;
+              const a = points[segIdx];
+              const b = points[(segIdx + 1) % points.length];
+              const [top, bot] = a.y <= b.y ? [a, b] : [b, a];
+              const dist = (cp.distanceFromTopMm ?? 0) / mmPerUnit;
+              const totalLen = Math.hypot(bot.x - top.x, bot.y - top.y);
+              const t = totalLen > 0 ? Math.min(1, dist / totalLen) : 0;
+              return (
+                <circle
+                  className="cable-pass-marker"
+                  cx={top.x + (bot.x - top.x) * t}
+                  cy={top.y + (bot.y - top.y) * t}
+                  r={7 / view.scale}
+                  vectorEffect="non-scaling-stroke"
+                  pointerEvents="none"
+                />
+              );
+            })() : null}
           </g>
         </svg>
 
@@ -2120,6 +2399,133 @@ export default function App() {
             </button>
           </div>
         ) : null}
+
+        <div className="workspace-panel workspace-panel--top-right">
+          <div className="section-title">Navigation</div>
+          <button className="secondary-button" type="button" onClick={resetView}>
+            <ZoomIn size={17} />
+            Reset vue
+          </button>
+          {isZipCanvasMode(mode) && isClosed ? (
+            <button className="secondary-button" type="button" onClick={exportCanvasPng}>
+              <Download size={17} />
+              Exporter PNG
+            </button>
+          ) : null}
+          <div className="hint-list">
+            {mode === 'trace' ? (
+              <>
+                <span>
+                  <MousePointer2 size={15} /> Clic fond : point
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Alt + clic point : supprimer
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Clic droit : menu
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Ctrl+Z / Ctrl+Shift+Z
+                </span>
+                <span>
+                  <MousePointer2 size={15} /> Double-clic segment : insérer
+                </span>
+              </>
+            ) : (
+              <>
+                <span>
+                  <MousePointer2 size={15} /> Glisser une ligne zip : hauteur
+                </span>
+                {isManualGussetSetup ? (
+                  <span>
+                    <MousePointer2 size={15} /> Clic point : coupe soufflet
+                  </span>
+                ) : null}
+              </>
+            )}
+            <span>
+              <Move size={15} /> Glisser fond : pan
+            </span>
+            <span>
+              <ZoomIn size={15} /> Molette : zoom
+            </span>
+          </div>
+        </div>
+
+        <div className="workspace-panel workspace-panel--bottom-right">
+          <div className="section-title">Formes</div>
+          <label className="field">
+            <span>Hydration bladder</span>
+            <select
+              value={overlayTemplateId}
+              onChange={(event) => setOverlayTemplateId(event.target.value)}
+            >
+              {HYDRATION_BLADDER_TEMPLATES.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="secondary-button" type="button" onClick={() => addOverlay(overlayTemplateId)}>
+            <Droplets size={17} />
+            Ajouter la forme
+          </button>
+          {selectedOverlay && selectedOverlayTemplate ? (
+            <div className="overlay-controls">
+              <div className="metric-row">
+                <span>Sélection</span>
+                <strong>{selectedOverlayTemplate.label}</strong>
+              </div>
+              <div className="metric-row">
+                <span>Taille</span>
+                <strong>
+                  {formatMm(selectedOverlay.width)} x {formatMm(selectedOverlay.height)} mm
+                </strong>
+              </div>
+              <label className="field">
+                <span>Rotation</span>
+                <input
+                  type="number"
+                  step="5"
+                  value={Math.round((selectedOverlay.rotation * 180) / Math.PI)}
+                  onFocus={recordHistory}
+                  onChange={(event) =>
+                    updateSelectedOverlay({
+                      rotation: (Number(event.target.value) * Math.PI) / 180,
+                    })
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Opacité</span>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={selectedOverlay.opacity}
+                  onPointerDown={recordHistory}
+                  onChange={(event) =>
+                    updateSelectedOverlay({
+                      opacity: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+              <button className="secondary-button" type="button" onClick={toggleSelectedOverlayMirror}>
+                <FlipHorizontal size={17} />
+                Miroir
+              </button>
+              <button className="secondary-button" type="button" onClick={deleteSelectedOverlay}>
+                <Trash2 size={17} />
+                Supprimer
+              </button>
+            </div>
+          ) : (
+            <p className="empty-state">Ajoutez une forme, puis glissez-la sur le tracé.</p>
+          )}
+        </div>
       </section>
     </main>
   );
