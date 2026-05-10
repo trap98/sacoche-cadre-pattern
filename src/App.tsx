@@ -419,11 +419,11 @@ export default function App() {
 
   const segmentCount = isClosed ? points.length : Math.max(0, points.length - 1);
   const selectedSegmentPoints = useMemo(() => {
-    if (!selectedSegment || points.length < 2) {
+    if (!selectedSegment || selectedSegment.startIndices.length !== 1 || points.length < 2) {
       return null;
     }
 
-    const start = selectedSegment.startIndex;
+    const start = selectedSegment.startIndices[0];
     const end = segmentEndIndex(start, points.length, isClosed);
 
     if (start === end) {
@@ -437,6 +437,34 @@ export default function App() {
       b: points[end],
     };
   }, [isClosed, points, selectedSegment]);
+
+  const selectedSegmentsInfo = useMemo(() => {
+    if (!selectedSegment || selectedSegment.startIndices.length === 0 || points.length < 2) {
+      return null;
+    }
+
+    const segments = selectedSegment.startIndices
+      .map((startIdx) => {
+        const endIdx = segmentEndIndex(startIdx, points.length, isClosed);
+        return { startIdx, endIdx, a: points[startIdx], b: points[endIdx] };
+      })
+      .filter((seg) => seg.startIdx !== seg.endIdx);
+
+    if (segments.length === 0) return null;
+
+    const totalLengthMm = segments.reduce(
+      (sum, seg) => sum + segmentLengthInMm(seg.a, seg.b, mmPerUnit),
+      0,
+    );
+    const midpoints = segments.map((seg) => segmentMidpoint(seg.a, seg.b));
+    const origin = {
+      x: midpoints.reduce((sum, p) => sum + p.x, 0) / midpoints.length,
+      y: midpoints.reduce((sum, p) => sum + p.y, 0) / midpoints.length,
+    };
+
+    return { segments, totalLengthMm, origin, count: segments.length };
+  }, [isClosed, points, selectedSegment, mmPerUnit]);
+
   const selectedOverlay = useMemo(
     () => overlays.find((overlay) => overlay.id === selectedOverlayId) ?? null,
     [overlays, selectedOverlayId],
@@ -446,9 +474,7 @@ export default function App() {
     : null;
   const pointNodeRadius = POINT_NODE_RADIUS_PX / view.scale;
 
-  const currentSelectedLengthMm = selectedSegmentPoints
-    ? segmentLengthInMm(selectedSegmentPoints.a, selectedSegmentPoints.b, mmPerUnit)
-    : null;
+  const currentSelectedLengthMm = selectedSegmentsInfo?.totalLengthMm ?? null;
   const traceBounds = useMemo(() => (points.length > 0 ? pointBounds(points) : null), [points]);
   const traceCentroid = useMemo(
     () => (points.length > 0 ? pointCentroid(points) : null),
@@ -1011,13 +1037,38 @@ export default function App() {
     }
 
     setContextMenu(null);
-    const endIndex = segmentEndIndex(startIndex, points.length, isClosed);
-    const lengthMm = segmentLengthInMm(points[startIndex], points[endIndex], mmPerUnit);
-
-    setSelectedSegment({ startIndex });
     setSelectedOverlayId(null);
-    setLengthInput(String(Math.round(lengthMm * 10) / 10));
-    setStatus('Segment sélectionné. Saisissez sa longueur réelle en millimètres.');
+
+    let nextIndices: number[];
+
+    if (event.shiftKey && selectedSegment) {
+      const already = selectedSegment.startIndices.includes(startIndex);
+      nextIndices = already
+        ? selectedSegment.startIndices.filter((i) => i !== startIndex)
+        : [...selectedSegment.startIndices, startIndex].sort((a, b) => a - b);
+    } else {
+      nextIndices = [startIndex];
+    }
+
+    const next: SegmentSelection | null =
+      nextIndices.length > 0 ? { startIndices: nextIndices } : null;
+    setSelectedSegment(next);
+
+    if (next && points.length >= 2) {
+      const totalMm = next.startIndices.reduce((sum, idx) => {
+        const endIdx = segmentEndIndex(idx, points.length, isClosed);
+        return sum + segmentLengthInMm(points[idx], points[endIdx], mmPerUnit);
+      }, 0);
+      setLengthInput(String(Math.round(totalMm * 10) / 10));
+    } else {
+      setLengthInput('');
+    }
+
+    const msg =
+      nextIndices.length > 1
+        ? `${nextIndices.length} segments sélectionnés. Saisissez leur longueur totale en mm.`
+        : 'Segment sélectionné. Saisissez sa longueur réelle en millimètres.';
+    setStatus(msg);
   }
 
   function selectCablePassSegment(startIndex: number, event: PointerEvent<SVGLineElement>) {
@@ -1124,7 +1175,7 @@ export default function App() {
   function applyCalibration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!selectedSegmentPoints) {
+    if (!selectedSegmentsInfo) {
       return;
     }
 
@@ -1135,13 +1186,13 @@ export default function App() {
       return;
     }
 
-    const scaleFactor = segmentScaleFactorForTargetMm(
-      selectedSegmentPoints.a,
-      selectedSegmentPoints.b,
-      mmPerUnit,
-      targetMm,
-    );
-    const origin = segmentMidpoint(selectedSegmentPoints.a, selectedSegmentPoints.b);
+    const { totalLengthMm, origin, count } = selectedSegmentsInfo;
+
+    if (totalLengthMm <= 0) {
+      return;
+    }
+
+    const scaleFactor = targetMm / totalLengthMm;
 
     recordHistory();
     setPoints((current) => scalePointsAround(current, origin, scaleFactor));
@@ -1159,7 +1210,8 @@ export default function App() {
         ...scaleImageFrameAround(overlay, origin, scaleFactor),
       })),
     );
-    setStatus(`Calibration appliquée : segment réglé à ${formatMm(targetMm)} mm.`);
+    const label = count > 1 ? `${count} segments réglés à` : 'segment réglé à';
+    setStatus(`Calibration appliquée : ${label} ${formatMm(targetMm)} mm.`);
   }
 
   function straightenSelectedSegment() {
@@ -1329,6 +1381,14 @@ export default function App() {
     clone.setAttribute('width', String(vw));
     clone.setAttribute('height', String(vh));
 
+    const bgRect = clone.querySelector('.workspace-hit-area');
+    if (bgRect) {
+      bgRect.setAttribute('x', String(vx));
+      bgRect.setAttribute('y', String(vy));
+      bgRect.setAttribute('width', String(vw));
+      bgRect.setAttribute('height', String(vh));
+    }
+
     const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
     style.textContent = `
       .workspace-hit-area { fill: #f4f5f6; }
@@ -1336,9 +1396,7 @@ export default function App() {
       .shape-line { fill: none; stroke: #1f6f5b; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
       .shape-fill-a { fill: rgba(37,99,168,0.10); stroke: none; }
       .shape-line-a { fill: none; stroke: #2563a8; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-      .face-canvas-label { font-weight: 700; font-family: sans-serif; }
-      .face-canvas-label--a { fill: #2563a8; }
-      .face-canvas-label--b { fill: #26734d; }
+      .face-canvas-label { display: none; }
       .zip-preview.faceA { color: #2563a8; }
       .zip-preview.faceB { color: #26734d; }
       .zip-preview-cutout { stroke: currentColor; opacity: 0.16; stroke-linecap: round; }
@@ -1351,7 +1409,11 @@ export default function App() {
       .point-node { fill: #ffffff; stroke: #1f6f5b; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
       .point-node.gusset-break { fill: #e85d04; stroke: #e85d04; }
       .cable-pass-marker { fill: none; stroke: #7c3aed; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
-      .trace-dimensions { display: none; }
+      .trace-dimensions { visibility: visible; pointer-events: none; }
+      .trace-dimension-line { fill: none; stroke: #4d5964; stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+      .trace-dimension-tick { stroke: #4d5964; stroke-width: 1; vector-effect: non-scaling-stroke; }
+      .trace-dimension-text { fill: #27313b; stroke: #ffffff; paint-order: stroke fill; font-weight: 700; letter-spacing: 0; font-family: sans-serif; }
+      .trace-dimension-text.segment { fill: #4d5964; font-weight: 600; }
       .scene-overlay-hit-area { display: none; }
       .scene-overlay-selection { display: none; }
       .bladder-path { fill: none; stroke: #4b535f; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
@@ -1556,20 +1618,22 @@ export default function App() {
 
             <section className="tool-section">
               <div className="section-title">Calibration</div>
-              {selectedSegmentPoints && currentSelectedLengthMm !== null ? (
+              {selectedSegmentsInfo && currentSelectedLengthMm !== null ? (
                 <form className="calibration-form" onSubmit={applyCalibration}>
                   <div className="metric-row">
-                    <span>Segment</span>
+                    <span>{selectedSegmentsInfo.count > 1 ? 'Segments' : 'Segment'}</span>
                     <strong>
-                      {selectedSegmentPoints.start + 1}-{selectedSegmentPoints.end + 1}
+                      {selectedSegmentsInfo.count > 1
+                        ? `${selectedSegmentsInfo.count} sélectionnés`
+                        : `${selectedSegmentsInfo.segments[0].startIdx + 1}–${selectedSegmentsInfo.segments[0].endIdx + 1}`}
                     </strong>
                   </div>
                   <div className="metric-row">
-                    <span>Longueur</span>
+                    <span>{selectedSegmentsInfo.count > 1 ? 'Longueur totale' : 'Longueur'}</span>
                     <strong>{formatMm(currentSelectedLengthMm)} mm</strong>
                   </div>
                   <label className="field">
-                    <span>Longueur réelle</span>
+                    <span>{selectedSegmentsInfo.count > 1 ? 'Longueur totale réelle' : 'Longueur réelle'}</span>
                     <input
                       type="number"
                       min="1"
@@ -1582,13 +1646,15 @@ export default function App() {
                     <Ruler size={18} />
                     Appliquer
                   </button>
-                  <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
-                    <AlignHorizontalSpaceAround size={18} />
-                    Remettre droit
-                  </button>
+                  {selectedSegmentsInfo.count === 1 && (
+                    <button className="secondary-button" type="button" onClick={straightenSelectedSegment}>
+                      <AlignHorizontalSpaceAround size={18} />
+                      Remettre droit
+                    </button>
+                  )}
                 </form>
               ) : (
-                <p className="empty-state">Sélectionnez un segment du tracé pour saisir sa longueur en mm.</p>
+                <p className="empty-state">Cliquez sur un segment pour le sélectionner. Maj+clic pour en ajouter plusieurs.</p>
               )}
             </section>
           </>
@@ -2023,8 +2089,8 @@ export default function App() {
               </>
             )}
 
-            {showTraceDimensions && traceBounds && points.length > 1 ? (
-              <g className="trace-dimensions">
+            {traceBounds && points.length > 1 ? (
+              <g className="trace-dimensions" visibility={showTraceDimensions ? undefined : 'hidden'}>
                 <line
                   className="trace-dimension-line"
                   x1={traceBounds.minX}
@@ -2282,7 +2348,7 @@ export default function App() {
               const endIndex = segmentEndIndex(index, points.length, isClosed);
               const a = points[index];
               const b = points[endIndex];
-              const selected = selectedSegment?.startIndex === index;
+              const selected = selectedSegment?.startIndices.includes(index) ?? false;
 
               return (
                 <line

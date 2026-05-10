@@ -33,5 +33,5 @@ export type ViewTransform = {
 };
 
 export type SegmentSelection = {
-  startIndex: number;
+  startIndices: number[];
 };
