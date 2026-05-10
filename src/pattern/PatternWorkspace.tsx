@@ -243,7 +243,7 @@ export function PatternWorkspace({
 }: PatternWorkspaceProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const panInteractionRef = useRef<PanInteraction | null>(null);
-  const [showReferencePaths, setShowReferencePaths] = useState(true);
+  const [showReferencePaths, setShowReferencePaths] = useState(false);
   const [patternView, setPatternView] = useState(INITIAL_PATTERN_VIEW);
   const [isPanning, setIsPanning] = useState(false);
   const shapeBounds = useMemo(() => boundingBox(shape.outline), [shape.outline]);
