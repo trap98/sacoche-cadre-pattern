@@ -321,6 +321,7 @@ export default function App() {
   const [lengthInput, setLengthInput] = useState('');
   const [mmPerUnit] = useState(DEFAULT_MM_PER_UNIT);
   const [showTraceDimensions, setShowTraceDimensions] = useState(true);
+  const [showTraceAngles, setShowTraceAngles] = useState(false);
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [historyPast, setHistoryPast] = useState<SceneSnapshot[]>([]);
@@ -1414,6 +1415,8 @@ export default function App() {
       .trace-dimension-tick { stroke: #4d5964; stroke-width: 1; vector-effect: non-scaling-stroke; }
       .trace-dimension-text { fill: #27313b; stroke: #ffffff; paint-order: stroke fill; font-weight: 700; letter-spacing: 0; font-family: sans-serif; }
       .trace-dimension-text.segment { fill: #4d5964; font-weight: 600; }
+      .trace-angles { visibility: visible; pointer-events: none; }
+      .trace-angle-text { fill: #7c3aed; stroke: #ffffff; paint-order: stroke fill; font-weight: 700; font-family: sans-serif; }
       .scene-overlay-hit-area { display: none; }
       .scene-overlay-selection { display: none; }
       .bladder-path { fill: none; stroke: #4b535f; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
@@ -1600,6 +1603,14 @@ export default function App() {
                   onChange={(event) => setShowTraceDimensions(event.target.checked)}
                 />
                 Afficher dimensions
+              </label>
+              <label className="checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={showTraceAngles}
+                  onChange={(event) => setShowTraceAngles(event.target.checked)}
+                />
+                Afficher angles
               </label>
               <button className="secondary-button" type="button" onClick={clearTrace} disabled={points.length === 0}>
                 <RotateCcw size={17} />
@@ -2229,6 +2240,54 @@ export default function App() {
                       dominantBaseline="middle"
                     >
                       {formatMm(segmentLengthInMm(a, b, mmPerUnit))} mm
+                    </text>
+                  );
+                })}
+              </g>
+            ) : null}
+
+            {isClosed && points.length > 2 ? (
+              <g className="trace-angles" visibility={showTraceAngles ? undefined : 'hidden'}>
+                {points.map((point, index) => {
+                  const prev = points[(index - 1 + points.length) % points.length];
+                  const next = points[(index + 1) % points.length];
+                  const v1 = { x: prev.x - point.x, y: prev.y - point.y };
+                  const v2 = { x: next.x - point.x, y: next.y - point.y };
+                  const l1 = Math.hypot(v1.x, v1.y);
+                  const l2 = Math.hypot(v2.x, v2.y);
+                  if (l1 === 0 || l2 === 0) return null;
+                  const cosAngle = Math.max(-1, Math.min(1, (v1.x * v2.x + v1.y * v2.y) / (l1 * l2)));
+                  const angleDeg = Math.round(Math.acos(cosAngle) * 180 / Math.PI);
+                  let bx = v1.x / l1 + v2.x / l2;
+                  let by = v1.y / l1 + v2.y / l2;
+                  const bl = Math.hypot(bx, by);
+                  if (bl < 0.001) {
+                    bx = -v1.y / l1;
+                    by = v1.x / l1;
+                  } else {
+                    bx /= bl;
+                    by /= bl;
+                  }
+                  if (traceCentroid) {
+                    const toCentroid = { x: traceCentroid.x - point.x, y: traceCentroid.y - point.y };
+                    if (bx * toCentroid.x + by * toCentroid.y < 0) {
+                      bx = -bx;
+                      by = -by;
+                    }
+                  }
+                  const offset = 22 / view.scale;
+                  return (
+                    <text
+                      key={`angle-${index}`}
+                      className="trace-angle-text"
+                      x={point.x + bx * offset}
+                      y={point.y + by * offset}
+                      fontSize={dimensionFontSize}
+                      strokeWidth={dimensionTextStroke}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                    >
+                      {angleDeg}°
                     </text>
                   );
                 })}

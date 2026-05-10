@@ -518,6 +518,18 @@ button {
   font-weight: 600;
 }
 
+.trace-angles {
+  pointer-events: none;
+}
+
+.trace-angle-text {
+  fill: #7c3aed;
+  stroke: #ffffff;
+  paint-order: stroke fill;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
 .preview-line {
   fill: none;
   stroke: #d8762a;
