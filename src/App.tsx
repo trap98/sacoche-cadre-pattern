@@ -20,6 +20,7 @@ import {
   Crosshair,
   Download,
   Droplets,
+  Upload,
   FlipHorizontal,
   ImagePlus,
   Move,
@@ -303,6 +304,7 @@ export function downloadSvgSnapshotAsPng(svgStr: string) {
 export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sessionInputRef = useRef<HTMLInputElement | null>(null);
   const interactionRef = useRef<Interaction | null>(null);
 
   const [image, setImage] = useState<SceneImage | null>(null);
@@ -619,6 +621,53 @@ export default function App() {
     });
     recordHistory();
     setStatus('Photo importée. Ajustez son opacité et tracez la sacoche.');
+  }
+
+  function exportSession() {
+    const state = {
+      version: 1,
+      image,
+      points,
+      isClosed,
+      overlays,
+      validatedShape,
+      patternParameters,
+      mode,
+    };
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `traçage-${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleSessionImport(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target?.result as string);
+        if (data.version !== 1) { setStatus('Version de session non supportée.'); return; }
+        setImage(data.image ?? null);
+        setPoints(data.points ?? []);
+        setIsClosed(data.isClosed ?? false);
+        setOverlays(data.overlays ?? []);
+        setValidatedShape(data.validatedShape ?? null);
+        setPatternParameters(data.patternParameters);
+        setMode(data.mode ?? 'trace');
+        setHistoryPast([]);
+        setHistoryFuture([]);
+        setStatus('Session restaurée.');
+      } catch {
+        setStatus('Fichier de session invalide.');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
   }
 
   function addOverlay(templateId: string) {
@@ -1552,6 +1601,25 @@ export default function App() {
             </span>
           </div>
         ) : null}
+
+        <section className="tool-section">
+          <div className="section-title">Session</div>
+          <input
+            ref={sessionInputRef}
+            className="hidden-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={handleSessionImport}
+          />
+          <button className="primary-button" type="button" onClick={exportSession}>
+            <Download size={18} />
+            Exporter
+          </button>
+          <button className="secondary-button" type="button" onClick={() => sessionInputRef.current?.click()}>
+            <Upload size={18} />
+            Charger
+          </button>
+        </section>
 
         {mode === 'trace' ? (
           <>
