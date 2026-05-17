@@ -18,6 +18,7 @@ export type PatternParameters = {
   zipperCoverWidthMm: number;
   zipperCoverLengthMm: number;
   zipperCoverGapMm: number;
+  sublimationScalePct: number;
   faceA: FaceOptions;
   faceB: FaceOptions;
   gusset: GussetOptions;

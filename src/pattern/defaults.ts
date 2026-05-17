@@ -25,13 +25,14 @@ export function makeFaceOptions(zipperCount: 0 | 1 | 2): FaceOptions {
 
 export const DEFAULT_PATTERN_PARAMETERS: PatternParameters = {
   seamAllowanceMm: 10,
-  bagDepthMm: 55,
+  bagDepthMm: 50,
   zipperCutoutHeightMm: 30,
   zipperEndPatchWidthMm: 60,
   zipperEndPatchHeightMm: 35,
   zipperCoverWidthMm: 35,
   zipperCoverLengthMm: 60,
   zipperCoverGapMm: 22,
+  sublimationScalePct: 100,
   faceA: makeFaceOptions(0),
   faceB: makeFaceOptions(0),
   gusset: {

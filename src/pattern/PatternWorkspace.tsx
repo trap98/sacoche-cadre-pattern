@@ -152,7 +152,9 @@ function FieldLabel({ children, help }: { children: string; help: string }) {
 function buildExportSvg(
   layout: ReturnType<typeof layoutPieces>,
   includeReferencePaths: boolean,
+  sublimationScalePct: number = 100,
 ): string {
+  const scale = sublimationScalePct / 100;
   const exportWidth = toExportUnit(layout.width);
   const exportHeight = toExportUnit(layout.height);
   const content = layout.pieces
@@ -215,7 +217,7 @@ function buildExportSvg(
     .join('');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}mm" height="${layout.height}mm" viewBox="0 0 ${exportWidth} ${exportHeight}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width * scale}mm" height="${layout.height * scale}mm" viewBox="0 0 ${exportWidth} ${exportHeight}">
   <rect width="${exportWidth}" height="${exportHeight}" fill="#ffffff" />
   ${content}
 </svg>
@@ -399,7 +401,7 @@ export function PatternWorkspace({
   function exportSvg() {
     downloadTextFile(
       'cadre-pattern.svg',
-      buildExportSvg(layout, showReferencePaths),
+      buildExportSvg(layout, showReferencePaths, parameters.sublimationScalePct),
       'image/svg+xml;charset=utf-8',
     );
   }
@@ -518,6 +520,19 @@ export function PatternWorkspace({
             <ArrowLeft size={17} />
             {backButtonLabel}
           </button>
+          <label className="field">
+            <FieldLabel help="Agrandissement appliqué aux dimensions physiques du SVG exporté pour compenser le rétrécissement lors de la sublimation. 100 = taille réelle, 102 = +2%.">
+              Échelle sublimation %
+            </FieldLabel>
+            <input
+              type="number"
+              min="95"
+              max="110"
+              step="0.5"
+              value={parameters.sublimationScalePct}
+              onChange={(event) => updateParameters({ sublimationScalePct: updateNumber(event.target.value) })}
+            />
+          </label>
           <button className="primary-button" type="button" onClick={exportSvg}>
             <Download size={17} />
             Exporter patron SVG
