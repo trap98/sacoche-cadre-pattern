@@ -204,6 +204,12 @@ function buildExportSvg(
             )}" fill="none" stroke="#9a5d1f" stroke-width="${toExportUnit(0.3)}" />`;
           }
 
+          if (annotation.type === 'split-mark') {
+            return `<polyline points="${pathPointsForExport(
+              annotation.points,
+            )}" fill="none" stroke="#c0392b" stroke-width="${toExportUnit(0.45)}" />`;
+          }
+
           return `<polyline points="${pathPointsForExport(
             annotation.points,
           )}" fill="none" stroke="#4b535f" stroke-width="${toExportUnit(

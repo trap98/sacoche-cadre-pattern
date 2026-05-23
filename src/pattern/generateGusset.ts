@@ -383,6 +383,26 @@ function gussetSectionsByManualBreaks(
   });
 }
 
+export function gussetPieceBoundaryVertexIndices(
+  shape: ValidatedBagShape,
+  gusset: GussetOptions,
+): number[] {
+  if (gusset.splitMode === 'single-piece') {
+    return [];
+  }
+
+  if (gusset.splitMode === 'one-piece-per-tube') {
+    return Array.from({ length: shape.outline.length }, (_, i) => i);
+  }
+
+  const sections =
+    gusset.splitMode === 'manual'
+      ? gussetSectionsByManualBreaks(shape.outline, gusset.manualBreakSegmentIndices)
+      : gussetSectionsByAngle(shape.outline, gusset.angleBreakThresholdDeg);
+
+  return sections.map((s) => s.startSegmentIndex);
+}
+
 export function generateGussetPieces(
   shape: ValidatedBagShape,
   gusset: GussetOptions,

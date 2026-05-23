@@ -1,4 +1,4 @@
-import type { FaceOptions, PatternParameters, PatternPiece, Point, ValidatedBagShape } from './types';
+import type { FaceOptions, PatternAnnotation, PatternParameters, PatternPiece, Point, ValidatedBagShape } from './types';
 import {
   applyApproximateSeamAllowance,
   boundingBox,
@@ -8,6 +8,7 @@ import {
   normalizePath,
   rectangle,
 } from './geometry';
+import { gussetPieceBoundaryVertexIndices } from './generateGusset';
 
 type FaceName = 'A' | 'B';
 
@@ -126,6 +127,103 @@ function buildFaceSections(
   });
 
   return sections;
+}
+
+function faceSegmentMarkAnnotations(
+  clipped: Point[],
+  path: Point[],
+  outline: Point[],
+  splitVertexIndices: Set<number>,
+  tickLength: number,
+): PatternAnnotation[] {
+  const epsilon = 0.01;
+  const annotations: PatternAnnotation[] = [];
+
+  clipped.forEach((refPoint, index) => {
+    const originalIndex = outline.findIndex(
+      (v) => Math.abs(v.x - refPoint.x) < epsilon && Math.abs(v.y - refPoint.y) < epsilon,
+    );
+
+    if (originalIndex < 0) return;
+
+    const cutPoint = path[index];
+    const dx = refPoint.x - cutPoint.x;
+    const dy = refPoint.y - cutPoint.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < epsilon) return;
+
+    const type = splitVertexIndices.has(originalIndex) ? ('split-mark' as const) : ('segment-mark' as const);
+
+    annotations.push({
+      type,
+      points: [
+        cutPoint,
+        { x: cutPoint.x + (dx / dist) * tickLength, y: cutPoint.y + (dy / dist) * tickLength },
+      ],
+    });
+  });
+
+  return annotations;
+}
+
+function cablePassMarkAnnotation(
+  clipped: Point[],
+  outline: Point[],
+  cablePass: { enabled: boolean; segmentIndex: number; distanceFromTopMm?: number; distanceFromSegmentStartMm?: number; overlapMm: number },
+  sectionMinY: number,
+  sectionMaxY: number,
+  seamAllowanceMm: number,
+  tickLength: number,
+): PatternAnnotation | null {
+  if (!cablePass.enabled || cablePass.overlapMm <= 0 || outline.length === 0) return null;
+
+  const n = outline.length;
+  const segIndex = Math.min(Math.max(Math.trunc(cablePass.segmentIndex), 0), n - 1);
+  const segStart = outline[segIndex];
+  const segEnd = outline[(segIndex + 1) % n];
+  const edgeDx = segEnd.x - segStart.x;
+  const edgeDy = segEnd.y - segStart.y;
+  const segLen = Math.hypot(edgeDx, edgeDy);
+
+  if (segLen < 0.001) return null;
+
+  let distFromStart: number;
+
+  if (cablePass.distanceFromTopMm !== undefined && Number.isFinite(cablePass.distanceFromTopMm)) {
+    const segStartIsTop = segStart.y <= segEnd.y;
+    const d = Math.min(Math.max(cablePass.distanceFromTopMm, 0), segLen);
+    distFromStart = segStartIsTop ? d : segLen - d;
+  } else {
+    distFromStart = Math.min(Math.max(cablePass.distanceFromSegmentStartMm ?? segLen / 2, 0), segLen);
+  }
+
+  const t = distFromStart / segLen;
+  const refPoint: Point = {
+    x: segStart.x + t * (segEnd.x - segStart.x),
+    y: segStart.y + t * (segEnd.y - segStart.y),
+  };
+
+  const epsilon = 0.1;
+
+  if (refPoint.y < sectionMinY - epsilon || refPoint.y > sectionMaxY + epsilon) return null;
+
+  // Outward normal: perpendicular to edge, pointing away from the polygon centroid
+  const cx = clipped.reduce((s, p) => s + p.x, 0) / clipped.length;
+  const cy = clipped.reduce((s, p) => s + p.y, 0) / clipped.length;
+  const n1x = edgeDy / segLen;
+  const n1y = -edgeDx / segLen;
+  const toCentroidDot = n1x * (cx - refPoint.x) + n1y * (cy - refPoint.y);
+  const outX = toCentroidDot > 0 ? -n1x : n1x;
+  const outY = toCentroidDot > 0 ? -n1y : n1y;
+
+  return {
+    type: 'split-mark',
+    points: [
+      { x: refPoint.x + outX * seamAllowanceMm, y: refPoint.y + outY * seamAllowanceMm },
+      { x: refPoint.x + outX * (seamAllowanceMm - tickLength), y: refPoint.y + outY * (seamAllowanceMm - tickLength) },
+    ],
+  };
 }
 
 function makeLabelAnnotation(label: string, path: Point[], seamAllowanceMm: number) {
@@ -287,6 +385,7 @@ export function generateFacePieces(
 ): PatternPiece[] {
   const outline = faceName === 'A' ? mirrorPathOnYAxis(normalizePath(shape.outline)) : normalizePath(shape.outline);
   const sections = buildFaceSections(faceName, outline, face, parameters);
+  const splitVertexIndices = new Set(gussetPieceBoundaryVertexIndices(shape, parameters.gusset));
   const pieces: PatternPiece[] = [];
 
   sections.forEach((section) => {
@@ -297,6 +396,12 @@ export function generateFacePieces(
     }
 
     const path = applyApproximateSeamAllowance(clipped, parameters.seamAllowanceMm);
+    const tickLength = Math.min(5, parameters.seamAllowanceMm);
+    const segmentMarks = faceSegmentMarkAnnotations(clipped, path, outline, splitVertexIndices, tickLength);
+    const cablePass = parameters.gusset.cablePass;
+    const cablePassMark = cablePass
+      ? cablePassMarkAnnotation(clipped, outline, cablePass, section.minY, section.maxY, parameters.seamAllowanceMm, tickLength)
+      : null;
 
     pieces.push({
       id: section.id,
@@ -304,7 +409,11 @@ export function generateFacePieces(
       kind: section.kind,
       paths: [path],
       referencePaths: [clipped],
-      annotations: [makeLabelAnnotation(section.label, path, parameters.seamAllowanceMm)],
+      annotations: [
+        makeLabelAnnotation(section.label, path, parameters.seamAllowanceMm),
+        ...segmentMarks,
+        ...(cablePassMark ? [cablePassMark] : []),
+      ],
     });
   });
 
