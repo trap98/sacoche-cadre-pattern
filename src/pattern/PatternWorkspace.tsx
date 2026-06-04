@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, PointerEvent } from 'react';
 import { DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM } from './defaults';
 import { generatePattern } from './generatePattern';
-import { boundingBox, segmentLength } from './geometry';
+import { boundingBox, segmentLength, signedPolygonArea } from './geometry';
 import { layoutPieces } from './layoutPieces';
 import { ensureZipperCount, updateNumber, zipperBottomClearanceValue } from './zipperOptions';
 import type { FaceOptions, PatternAnnotation, PatternParameters, Point, ValidatedBagShape } from './types';
@@ -501,6 +501,10 @@ export function PatternWorkspace({
     );
   }
 
+  const volumeL = (Math.abs(signedPolygonArea(shape.outline)) * parameters.bagDepthMm) / 1_000_000;
+  const formatL = (v: number) =>
+    new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(v);
+
   return (
     <main className="app-shell pattern-shell">
       <aside className="tool-panel" aria-label="Paramètres patronnage">
@@ -521,6 +525,10 @@ export function PatternWorkspace({
           <div className="metric-row">
             <span>Unités</span>
             <strong>mm</strong>
+          </div>
+          <div className="metric-row">
+            <span>Volume estimé</span>
+            <strong>≈ {formatL(volumeL)} L</strong>
           </div>
           <button className="secondary-button" type="button" onClick={onBackToTrace}>
             <ArrowLeft size={17} />
