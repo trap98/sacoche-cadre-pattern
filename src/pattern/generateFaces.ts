@@ -25,6 +25,8 @@ type ActiveZipper = {
   distanceFromTopTubeMm: number;
 };
 
+const CUT_EDGE_EPSILON = 0.001;
+
 function resolveZipperDistanceFromTop(
   zipper: FaceOptions['zippers'][number],
   index: number,
@@ -129,10 +131,32 @@ function buildFaceSections(
   return sections;
 }
 
+function applyFaceSectionSeamAllowance(
+  clipped: Point[],
+  section: FaceSection,
+  outlineSeamPath: Point[],
+  outlineBounds: ReturnType<typeof boundingBox>,
+  seamAllowanceMm: number,
+): Point[] {
+  if (seamAllowanceMm <= 0) {
+    return clipped.map((point) => ({ ...point }));
+  }
+
+  const hasInternalTopCut = section.minY > outlineBounds.minY + CUT_EDGE_EPSILON;
+  const hasInternalBottomCut = section.maxY < outlineBounds.maxY - CUT_EDGE_EPSILON;
+  const seamBounds = boundingBox(outlineSeamPath);
+  const minY = hasInternalTopCut ? section.minY - seamAllowanceMm : seamBounds.minY;
+  const maxY = hasInternalBottomCut ? section.maxY + seamAllowanceMm : seamBounds.maxY;
+  const path = clipPolygonToHorizontalRange(outlineSeamPath, minY, maxY);
+
+  return path.length >= 3 ? path : clipped.map((point) => ({ ...point }));
+}
+
 function faceSegmentMarkAnnotations(
   clipped: Point[],
   path: Point[],
   outline: Point[],
+  outlineSeamPath: Point[],
   splitVertexIndices: Set<number>,
   tickLength: number,
 ): PatternAnnotation[] {
@@ -146,7 +170,7 @@ function faceSegmentMarkAnnotations(
 
     if (originalIndex < 0) return;
 
-    const cutPoint = path[index];
+    const cutPoint = outlineSeamPath[originalIndex] ?? path[index];
     const dx = refPoint.x - cutPoint.x;
     const dy = refPoint.y - cutPoint.y;
     const dist = Math.hypot(dx, dy);
@@ -385,6 +409,8 @@ export function generateFacePieces(
 ): PatternPiece[] {
   const outline = faceName === 'A' ? mirrorPathOnYAxis(normalizePath(shape.outline)) : normalizePath(shape.outline);
   const sections = buildFaceSections(faceName, outline, face, parameters);
+  const outlineBounds = boundingBox(outline);
+  const outlineSeamPath = applyApproximateSeamAllowance(outline, parameters.seamAllowanceMm);
   const splitVertexIndices = new Set(gussetPieceBoundaryVertexIndices(shape, parameters.gusset));
   const pieces: PatternPiece[] = [];
 
@@ -395,9 +421,15 @@ export function generateFacePieces(
       return;
     }
 
-    const path = applyApproximateSeamAllowance(clipped, parameters.seamAllowanceMm);
+    const path = applyFaceSectionSeamAllowance(
+      clipped,
+      section,
+      outlineSeamPath,
+      outlineBounds,
+      parameters.seamAllowanceMm,
+    );
     const tickLength = Math.min(5, parameters.seamAllowanceMm);
-    const segmentMarks = faceSegmentMarkAnnotations(clipped, path, outline, splitVertexIndices, tickLength);
+    const segmentMarks = faceSegmentMarkAnnotations(clipped, path, outline, outlineSeamPath, splitVertexIndices, tickLength);
     const cablePass = parameters.gusset.cablePass;
     const cablePassMark = cablePass
       ? cablePassMarkAnnotation(clipped, outline, cablePass, section.minY, section.maxY, parameters.seamAllowanceMm, tickLength)

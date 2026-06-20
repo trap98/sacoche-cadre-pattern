@@ -43,6 +43,18 @@ const curvedTubeShape: ValidatedBagShape = {
   unit: 'mm',
 };
 
+const acuteZipShape: ValidatedBagShape = {
+  outline: [
+    { x: 0, y: 0 },
+    { x: 300, y: 0 },
+    { x: 500, y: 40 },
+    { x: 200, y: 100 },
+    { x: 0, y: 100 },
+  ],
+  closed: true,
+  unit: 'mm',
+};
+
 function testParameters(overrides: Partial<PatternParameters> = {}): PatternParameters {
   return {
     ...DEFAULT_PATTERN_PARAMETERS,
@@ -248,6 +260,26 @@ describe('face generation', () => {
     expect(lower).toBeDefined();
     expect(boundingBox(upper!.paths[0]).maxY).toBe(24);
     expect(boundingBox(lower!.paths[0]).minY).toBe(36);
+  });
+
+  it('keeps seam allowance edges parallel around zipper cutouts on acute outlines', () => {
+    const pieces = generateFacePieces(
+      'B',
+      acuteZipShape,
+      faceWithZips(40),
+      testParameters({ zipperCutoutHeightMm: 30, seamAllowanceMm: 10 }),
+    );
+    const upper = pieces.find((piece) => piece.label.includes('haut zip 1'));
+    const lower = pieces.find((piece) => piece.label.includes('bas zip 1'));
+    const zipperCutTopY = 25;
+    const zipperCutBottomY = 55;
+    const pointsAtY = (piece: typeof upper, y: number) =>
+      piece!.paths[0].filter((point) => Math.abs(point.y - y) < 0.001);
+
+    expect(upper).toBeDefined();
+    expect(lower).toBeDefined();
+    expect(pointsAtY(upper, zipperCutTopY + 10)).toHaveLength(2);
+    expect(pointsAtY(lower, zipperCutBottomY - 10)).toHaveLength(2);
   });
 
   it('places zip 2 from the bottom clearance so the lower piece keeps the requested bladder height', () => {
