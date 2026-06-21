@@ -32,7 +32,7 @@ export const DEFAULT_PATTERN_PARAMETERS: PatternParameters = {
   zipperCoverWidthMm: 35,
   zipperCoverLengthMm: 60,
   zipperCoverGapMm: 22,
-  sublimationScalePct: 100,
+  sublimationScalePct: 101,
   faceA: makeFaceOptions(0),
   faceB: makeFaceOptions(0),
   gusset: {

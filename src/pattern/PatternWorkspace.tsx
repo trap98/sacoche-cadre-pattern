@@ -152,7 +152,7 @@ function FieldLabel({ children, help }: { children: string; help: string }) {
 function buildExportSvg(
   layout: ReturnType<typeof layoutPieces>,
   includeReferencePaths: boolean,
-  sublimationScalePct: number = 100,
+  sublimationScalePct: number = 101,
 ): string {
   const scale = sublimationScalePct / 100;
   const exportWidth = toExportUnit(layout.width);
