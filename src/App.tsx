@@ -23,6 +23,7 @@ import {
   Upload,
   FlipHorizontal,
   ImagePlus,
+  MapPin,
   Move,
   MousePointer2,
   Redo2,
@@ -56,6 +57,9 @@ import {
 import {
   DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
   DEFAULT_PATTERN_PARAMETERS,
+  makeDefaultCablePass,
+  normalizePatternParameters,
+  resolveCablePasses,
 } from './pattern/defaults';
 import { horizontalLineIntersections } from './pattern/geometry';
 import { PatternWorkspace } from './pattern/PatternWorkspace';
@@ -66,7 +70,7 @@ import {
   updateNumber,
   zipperBottomClearanceValue,
 } from './pattern/zipperOptions';
-import type { FaceOptions, PatternParameters, ValidatedBagShape } from './pattern/types';
+import type { CablePassOptions, FaceOptions, PatternParameters, SegmentPointMark, ValidatedBagShape } from './pattern/types';
 import type { Point, SceneImage, SceneOverlay, SegmentSelection, ViewTransform } from './types';
 
 type Interaction =
@@ -269,36 +273,14 @@ function pointCentroid(points: Point[]): Point {
   };
 }
 
-export function downloadSvgSnapshotAsPng(svgStr: string) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgStr, 'image/svg+xml');
-  const svgEl = doc.documentElement;
-  const vw = parseFloat(svgEl.getAttribute('width') ?? '800');
-  const vh = parseFloat(svgEl.getAttribute('height') ?? '600');
-
+export function downloadSvgSnapshot(svgStr: string) {
   const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
-  const img = new Image();
-  img.onload = () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(vw * 2);
-    canvas.height = Math.round(vh * 2);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) { URL.revokeObjectURL(url); return; }
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
-    canvas.toBlob((pngBlob) => {
-      if (!pngBlob) return;
-      const pngUrl = URL.createObjectURL(pngBlob);
-      const link = document.createElement('a');
-      link.href = pngUrl;
-      link.download = 'cadre-vue-finale.png';
-      link.click();
-      URL.revokeObjectURL(pngUrl);
-    }, 'image/png');
-  };
-  img.onerror = () => URL.revokeObjectURL(url);
-  img.src = url;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'cadre-vue-finale.svg';
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function App() {
@@ -332,6 +314,8 @@ export default function App() {
   const [traceExpanded, setTraceExpanded] = useState(false);
   const [stepHistories, setStepHistories] = useState<Partial<Record<AppMode, StepHistory>>>({});
   const [canvasSvgSnapshot, setCanvasSvgSnapshot] = useState<string | null>(null);
+  const [activeCablePassIndex, setActiveCablePassIndex] = useState(0);
+  const [isPlacingMarkPoint, setIsPlacingMarkPoint] = useState(false);
 
   const makeSceneSnapshot = useCallback(
     (): SceneSnapshot => ({
@@ -497,18 +481,23 @@ export default function App() {
   );
   const isManualGussetSetup =
     mode === 'gusset' && patternParameters.gusset.splitMode === 'manual';
-  const cablePassSegmentIndex = patternParameters.gusset.cablePass?.segmentIndex ?? 2;
+  const cablePasses = resolveCablePasses(patternParameters.gusset);
+  const markPoints = patternParameters.markPoints ?? [];
+  const activeCablePassIdx = Math.max(0, Math.min(activeCablePassIndex, cablePasses.length - 1));
   const canSelectCablePassSegment =
-    mode === 'cable-pass' && (patternParameters.gusset.cablePass?.enabled ?? false);
-  const cablePassSegmentLengthMm = useMemo(() => {
-    if (points.length < 2 || cablePassSegmentIndex < 0 || cablePassSegmentIndex >= segmentCount) {
-      return 0;
-    }
+    mode === 'cable-pass' && (cablePasses.length > 0 || isPlacingMarkPoint);
+  const segmentLengthMmAt = useCallback(
+    (segmentIndex: number): number => {
+      if (points.length < 2 || segmentIndex < 0 || segmentIndex >= segmentCount) {
+        return 0;
+      }
 
-    const endIndex = segmentEndIndex(cablePassSegmentIndex, points.length, isClosed);
+      const endIndex = segmentEndIndex(segmentIndex, points.length, isClosed);
 
-    return segmentLengthInMm(points[cablePassSegmentIndex], points[endIndex], mmPerUnit);
-  }, [cablePassSegmentIndex, isClosed, mmPerUnit, points, segmentCount]);
+      return segmentLengthInMm(points[segmentIndex], points[endIndex], mmPerUnit);
+    },
+    [isClosed, mmPerUnit, points, segmentCount],
+  );
   const zipPreviews = useMemo(() => {
     if (!isZipCanvasMode(mode) || !isClosed || !traceBounds) {
       return [];
@@ -657,7 +646,9 @@ export default function App() {
         setIsClosed(data.isClosed ?? false);
         setOverlays(data.overlays ?? []);
         setValidatedShape(data.validatedShape ?? null);
-        setPatternParameters(data.patternParameters);
+        setPatternParameters(normalizePatternParameters(data.patternParameters));
+        setActiveCablePassIndex(0);
+        setIsPlacingMarkPoint(false);
         setMode(data.mode ?? 'trace');
         setHistoryPast([]);
         setHistoryFuture([]);
@@ -755,26 +746,84 @@ export default function App() {
     }));
   }
 
-  function updateCablePass(patch: Partial<NonNullable<PatternParameters['gusset']['cablePass']>>) {
+  function setCablePasses(updater: (current: CablePassOptions[]) => CablePassOptions[]) {
     setPatternParameters((current) => {
-      const currentCablePass = current.gusset.cablePass ?? {
-        enabled: false,
-        segmentIndex: 2,
-        distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-        overlapMm: 10,
-      };
+      const { cablePass, ...gusset } = current.gusset;
+      void cablePass;
 
       return {
         ...current,
         gusset: {
-          ...current.gusset,
-          cablePass: {
-            ...currentCablePass,
-            ...patch,
-          },
+          ...gusset,
+          cablePasses: updater(resolveCablePasses(current.gusset)),
         },
       };
     });
+  }
+
+  function updateCablePassAt(index: number, patch: Partial<CablePassOptions>) {
+    setCablePasses((current) =>
+      current.map((cablePass, cablePassIndex) =>
+        cablePassIndex === index ? { ...cablePass, ...patch } : cablePass,
+      ),
+    );
+  }
+
+  function addCablePass() {
+    setActiveCablePassIndex(cablePasses.length);
+    setIsPlacingMarkPoint(false);
+    setCablePasses((current) => [...current, makeDefaultCablePass()]);
+    setStatus('Passe cable ajouté. Cliquez sur un segment du tracé pour le positionner.');
+  }
+
+  function removeCablePass(index: number) {
+    setActiveCablePassIndex((current) => (current > index ? current - 1 : Math.max(0, Math.min(current, cablePasses.length - 2))));
+    setCablePasses((current) => current.filter((_, cablePassIndex) => cablePassIndex !== index));
+    setStatus('Passe cable supprimé.');
+  }
+
+  function updateMarkPoints(updater: (current: SegmentPointMark[]) => SegmentPointMark[]) {
+    setPatternParameters((current) => ({
+      ...current,
+      markPoints: updater(current.markPoints ?? []),
+    }));
+  }
+
+  function updateMarkPointAt(index: number, patch: Partial<SegmentPointMark>) {
+    updateMarkPoints((current) =>
+      current.map((mark, markIndex) => (markIndex === index ? { ...mark, ...patch } : mark)),
+    );
+  }
+
+  function removeMarkPoint(index: number) {
+    updateMarkPoints((current) => current.filter((_, markIndex) => markIndex !== index));
+    setStatus('Repère supprimé.');
+  }
+
+  function addMarkPointOnSegment(startIndex: number, worldPoint: Point) {
+    const endIndex = segmentEndIndex(startIndex, points.length, isClosed);
+    const a = points[startIndex];
+    const b = points[endIndex];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared <= 0) {
+      return;
+    }
+
+    const t = clamp(((worldPoint.x - a.x) * dx + (worldPoint.y - a.y) * dy) / lengthSquared, 0, 1);
+    const distanceFromStartMm = t * Math.sqrt(lengthSquared) * mmPerUnit;
+
+    updateMarkPoints((current) => [
+      ...current,
+      {
+        id: `mark-${Date.now()}`,
+        segmentIndex: startIndex,
+        distanceFromStartMm: Math.round(distanceFromStartMm * 10) / 10,
+      },
+    ]);
+    setStatus(`Repère ajouté sur le segment ${startIndex + 1} à ${formatMm(distanceFromStartMm)} mm.`);
   }
 
   function updateFace(faceKey: FaceKey, updater: (face: FaceOptions) => FaceOptions) {
@@ -1131,11 +1180,18 @@ export default function App() {
     setContextMenu(null);
     setSelectedSegment(null);
     setSelectedOverlayId(null);
-    updateCablePass({
-      enabled: true,
-      segmentIndex: startIndex,
-    });
-    setStatus(`Segment ${startIndex + 1} sélectionné pour le passe cable.`);
+
+    if (isPlacingMarkPoint) {
+      addMarkPointOnSegment(startIndex, screenToWorld(getScreenPoint(event), view));
+      return;
+    }
+
+    if (cablePasses.length === 0) {
+      return;
+    }
+
+    updateCablePassAt(activeCablePassIdx, { segmentIndex: startIndex });
+    setStatus(`Segment ${startIndex + 1} sélectionné pour le passe cable ${activeCablePassIdx + 1}.`);
   }
 
   function insertPointInSegment(startIndex: number, event: MouseEvent<SVGLineElement>) {
@@ -1428,8 +1484,8 @@ export default function App() {
 
     const clone = svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute('viewBox', `${vx} ${vy} ${vw} ${vh}`);
-    clone.setAttribute('width', String(vw));
-    clone.setAttribute('height', String(vh));
+    clone.setAttribute('width', `${(rightWorld - leftWorld) * mmPerUnit}mm`);
+    clone.setAttribute('height', `${(bottomWorld - topWorld) * mmPerUnit}mm`);
 
     const bgRect = clone.querySelector('.workspace-hit-area');
     if (bgRect) {
@@ -1459,6 +1515,8 @@ export default function App() {
       .point-node { fill: #ffffff; stroke: #1f6f5b; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
       .point-node.gusset-break { fill: #e85d04; stroke: #e85d04; }
       .cable-pass-marker { fill: none; stroke: #7c3aed; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+      .point-mark-marker line { stroke: #2563eb; stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+      .point-mark-marker-hit { fill: none; stroke: none; }
       .trace-dimensions { visibility: visible; pointer-events: none; }
       .trace-dimension-line { fill: none; stroke: #4d5964; stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
       .trace-dimension-tick { stroke: #4d5964; stroke-width: 1; vector-effect: non-scaling-stroke; }
@@ -1478,10 +1536,10 @@ export default function App() {
     return new XMLSerializer().serializeToString(clone);
   }
 
-  function exportCanvasPng() {
+  function exportCanvasSvg() {
     const svgStr = buildCanvasSvgSnapshot();
     if (!svgStr) return;
-    downloadSvgSnapshotAsPng(svgStr);
+    downloadSvgSnapshot(svgStr);
   }
 
   function renderZipSetupFaceControls(faceKey: FaceKey, label: string) {
@@ -1904,70 +1962,123 @@ export default function App() {
         ) : null}
 
         {mode === 'cable-pass' ? (
-          <section className="tool-section">
-            <div className="section-title">Passe cable</div>
-            {(() => {
-              const cablePass = patternParameters.gusset.cablePass ?? {
-                enabled: false,
-                segmentIndex: 2,
-                distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-                overlapMm: 10,
-              };
-              const distanceFromTopMm =
-                cablePass.distanceFromTopMm ??
-                cablePass.distanceFromSegmentStartMm ??
-                DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
+          <>
+            <section className="tool-section">
+              <div className="section-title">Passe cable</div>
+              {cablePasses.length === 0 ? (
+                <p className="empty-state">Aucun passe cable. Ajoutez-en un si nécessaire.</p>
+              ) : null}
+              {cablePasses.map((cablePass, index) => {
+                const distanceFromTopMm =
+                  cablePass.distanceFromTopMm ??
+                  cablePass.distanceFromSegmentStartMm ??
+                  DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
+                const isActive = !isPlacingMarkPoint && index === activeCablePassIdx;
 
-              return (
-                <>
-                  <label className="checkbox-field">
-                    <input
-                      type="checkbox"
-                      checked={cablePass.enabled}
-                      onChange={(event) => updateCablePass({ enabled: event.target.checked })}
-                    />
-                    <span>Passe cable down tube</span>
-                  </label>
-                  {cablePass.enabled ? (
-                    <>
+                return (
+                  <div
+                    className={isActive ? 'list-item active' : 'list-item'}
+                    key={`cable-pass-${index}`}
+                    onClick={() => {
+                      setActiveCablePassIndex(index);
+                      setIsPlacingMarkPoint(false);
+                    }}
+                  >
+                    <div className="metric-row">
+                      <span>
+                        Passe cable {index + 1} · segment {cablePass.segmentIndex + 1}
+                      </span>
+                      <button
+                        className="icon-button"
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeCablePass(index);
+                        }}
+                        title="Supprimer ce passe cable"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                    {isActive ? (
                       <p className="empty-state">
                         Cliquez sur un segment du tracé pour le sélectionner.
                       </p>
-                      <div className="metric-row">
-                        <span>Segment sélectionné</span>
-                        <strong>{cablePass.segmentIndex + 1}</strong>
-                      </div>
-                      <label className="field">
-                        <span>Distance depuis haut du segment</span>
-                        <input
-                          type="number"
-                          min="0"
-                          max={Math.max(0, Math.round(cablePassSegmentLengthMm * 10) / 10)}
-                          step="1"
-                          value={Math.round(distanceFromTopMm * 10) / 10}
-                          onChange={(event) =>
-                            updateCablePass({ distanceFromTopMm: updateNumber(event.target.value) })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Chevauchement</span>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={cablePass.overlapMm}
-                          onChange={(event) =>
-                            updateCablePass({ overlapMm: updateNumber(event.target.value) })
-                          }
-                        />
-                      </label>
-                    </>
-                  ) : null}
-                </>
-              );
-            })()}
-          </section>
+                    ) : null}
+                    <label className="field">
+                      <span>Distance depuis haut du segment</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max={Math.max(0, Math.round(segmentLengthMmAt(cablePass.segmentIndex) * 10) / 10)}
+                        step="1"
+                        value={Math.round(distanceFromTopMm * 10) / 10}
+                        onChange={(event) =>
+                          updateCablePassAt(index, { distanceFromTopMm: updateNumber(event.target.value) })
+                        }
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Chevauchement</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={cablePass.overlapMm}
+                        onChange={(event) =>
+                          updateCablePassAt(index, { overlapMm: updateNumber(event.target.value) })
+                        }
+                      />
+                    </label>
+                  </div>
+                );
+              })}
+              <button className="secondary-button" type="button" onClick={addCablePass}>
+                <CirclePlus size={17} />
+                Ajouter un passe cable
+              </button>
+            </section>
+
+            <section className="tool-section">
+              <div className="section-title">Repères</div>
+              <button
+                className={isPlacingMarkPoint ? 'primary-button' : 'secondary-button'}
+                type="button"
+                onClick={() => {
+                  setIsPlacingMarkPoint((current) => !current);
+                  setStatus(
+                    isPlacingMarkPoint
+                      ? 'Placement de repères terminé.'
+                      : 'Cliquez sur un segment du tracé pour placer un repère.',
+                  );
+                }}
+              >
+                <MapPin size={17} />
+                {isPlacingMarkPoint ? 'Terminer le placement' : 'Placer un repère'}
+              </button>
+              {markPoints.length === 0 ? (
+                <p className="empty-state">
+                  Les repères sont reportés sur le patron sous forme de petits crans.
+                </p>
+              ) : (
+                markPoints.map((mark, index) => (
+                  <div className="metric-row" key={mark.id}>
+                    <span>
+                      Repère {index + 1} · seg. {mark.segmentIndex + 1} · {formatMm(mark.distanceFromStartMm)} mm
+                    </span>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => removeMarkPoint(index)}
+                      title="Supprimer ce repère"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </section>
+          </>
         ) : null}
 
         {isZipCanvasMode(mode) ? (
@@ -2497,7 +2608,8 @@ export default function App() {
               const endIndex = segmentEndIndex(index, points.length, isClosed);
               const a = points[index];
               const b = points[endIndex];
-              const selected = cablePassSegmentIndex === index;
+              const selected =
+                !isPlacingMarkPoint && cablePasses[activeCablePassIdx]?.segmentIndex === index;
 
               return (
                 <line
@@ -2556,27 +2668,69 @@ export default function App() {
               />
             ))}
 
-            {isZipCanvasMode(mode) && patternParameters.gusset.cablePass?.enabled && isClosed ? (() => {
-              const cp = patternParameters.gusset.cablePass!;
-              const segIdx = cp.segmentIndex;
-              if (segIdx >= points.length) return null;
-              const a = points[segIdx];
-              const b = points[(segIdx + 1) % points.length];
-              const [top, bot] = a.y <= b.y ? [a, b] : [b, a];
-              const dist = (cp.distanceFromTopMm ?? 0) / mmPerUnit;
-              const totalLen = Math.hypot(bot.x - top.x, bot.y - top.y);
-              const t = totalLen > 0 ? Math.min(1, dist / totalLen) : 0;
-              return (
-                <circle
-                  className="cable-pass-marker"
-                  cx={top.x + (bot.x - top.x) * t}
-                  cy={top.y + (bot.y - top.y) * t}
-                  r={7 / view.scale}
-                  vectorEffect="non-scaling-stroke"
-                  pointerEvents="none"
-                />
-              );
-            })() : null}
+            {isZipCanvasMode(mode) && isClosed
+              ? cablePasses.map((cablePass, index) => {
+                  if (!cablePass.enabled || cablePass.segmentIndex >= points.length) return null;
+                  const a = points[cablePass.segmentIndex];
+                  const b = points[(cablePass.segmentIndex + 1) % points.length];
+                  const [top, bot] = a.y <= b.y ? [a, b] : [b, a];
+                  const dist =
+                    (cablePass.distanceFromTopMm ??
+                      cablePass.distanceFromSegmentStartMm ??
+                      0) / mmPerUnit;
+                  const totalLen = Math.hypot(bot.x - top.x, bot.y - top.y);
+                  const t = totalLen > 0 ? Math.min(1, dist / totalLen) : 0;
+                  const isActive =
+                    mode === 'cable-pass' && !isPlacingMarkPoint && index === activeCablePassIdx;
+
+                  return (
+                    <circle
+                      className={isActive ? 'cable-pass-marker active' : 'cable-pass-marker'}
+                      key={`cable-pass-marker-${index}`}
+                      cx={top.x + (bot.x - top.x) * t}
+                      cy={top.y + (bot.y - top.y) * t}
+                      r={7 / view.scale}
+                      vectorEffect="non-scaling-stroke"
+                      pointerEvents="none"
+                    />
+                  );
+                })
+              : null}
+
+            {isZipCanvasMode(mode) && isClosed
+              ? markPoints.map((mark, index) => {
+                  if (mark.segmentIndex < 0 || mark.segmentIndex >= segmentCount) return null;
+                  const endIndex = segmentEndIndex(mark.segmentIndex, points.length, isClosed);
+                  const a = points[mark.segmentIndex];
+                  const b = points[endIndex];
+                  const totalLen = Math.hypot(b.x - a.x, b.y - a.y);
+                  if (totalLen <= 0) return null;
+                  const t = Math.min(1, mark.distanceFromStartMm / mmPerUnit / totalLen);
+                  const cx = a.x + (b.x - a.x) * t;
+                  const cy = a.y + (b.y - a.y) * t;
+                  const s = 5 / view.scale;
+
+                  return (
+                    <g
+                      className="point-mark-marker"
+                      key={mark.id}
+                      pointerEvents={mode === 'cable-pass' ? undefined : 'none'}
+                      onPointerDown={
+                        mode === 'cable-pass'
+                          ? (event) => {
+                              event.stopPropagation();
+                              if (event.button === 0) removeMarkPoint(index);
+                            }
+                          : undefined
+                      }
+                    >
+                      <circle className="point-mark-marker-hit" cx={cx} cy={cy} r={s * 2} />
+                      <line x1={cx - s} y1={cy - s} x2={cx + s} y2={cy + s} vectorEffect="non-scaling-stroke" />
+                      <line x1={cx - s} y1={cy + s} x2={cx + s} y2={cy - s} vectorEffect="non-scaling-stroke" />
+                    </g>
+                  );
+                })
+              : null}
           </g>
         </svg>
 
@@ -2600,9 +2754,9 @@ export default function App() {
             Reset vue
           </button>
           {isZipCanvasMode(mode) && isClosed ? (
-            <button className="secondary-button" type="button" onClick={exportCanvasPng}>
+            <button className="secondary-button" type="button" onClick={exportCanvasSvg}>
               <Download size={17} />
-              Exporter PNG
+              Exporter SVG
             </button>
           ) : null}
           <div className="hint-list">
@@ -2633,6 +2787,17 @@ export default function App() {
                   <span>
                     <MousePointer2 size={15} /> Clic point : coupe soufflet
                   </span>
+                ) : null}
+                {mode === 'cable-pass' ? (
+                  <>
+                    <span>
+                      <MousePointer2 size={15} />{' '}
+                      {isPlacingMarkPoint ? 'Clic segment : repère' : 'Clic segment : passe cable'}
+                    </span>
+                    <span>
+                      <MousePointer2 size={15} /> Clic repère : supprimer
+                    </span>
+                  </>
                 ) : null}
               </>
             )}

@@ -1,10 +1,47 @@
-import type { FaceOptions, PatternParameters, ZipperOptions } from './types';
+import type {
+  CablePassOptions,
+  FaceOptions,
+  GussetOptions,
+  PatternParameters,
+  ZipperOptions,
+} from './types';
 
 export const DEFAULT_ZIPPER_DISTANCES_MM = [40, 200] as const;
 export const DEFAULT_ZIPPER_BOTTOM_CLEARANCE_MM = 210;
 export const DEFAULT_CABLE_PASS_SEGMENT_INDEX = 2;
 export const DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM = 50;
 export const DEFAULT_CABLE_PASS_OVERLAP_MM = 20;
+
+export function makeDefaultCablePass(): CablePassOptions {
+  return {
+    enabled: true,
+    segmentIndex: DEFAULT_CABLE_PASS_SEGMENT_INDEX,
+    distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
+    overlapMm: DEFAULT_CABLE_PASS_OVERLAP_MM,
+  };
+}
+
+export function resolveCablePasses(gusset: GussetOptions): CablePassOptions[] {
+  if (gusset.cablePasses) {
+    return gusset.cablePasses;
+  }
+
+  return gusset.cablePass ? [gusset.cablePass] : [];
+}
+
+export function normalizePatternParameters(parameters: PatternParameters): PatternParameters {
+  const { cablePass, ...gusset } = parameters.gusset;
+
+  return {
+    ...parameters,
+    gusset: {
+      ...gusset,
+      cablePasses:
+        parameters.gusset.cablePasses ?? (cablePass && cablePass.enabled ? [cablePass] : []),
+    },
+    markPoints: parameters.markPoints ?? [],
+  };
+}
 
 export function makeDefaultZipper(index: number): ZipperOptions {
   return {
@@ -39,11 +76,7 @@ export const DEFAULT_PATTERN_PARAMETERS: PatternParameters = {
     splitMode: 'single-piece',
     angleBreakThresholdDeg: 25,
     manualBreakSegmentIndices: [],
-    cablePass: {
-      enabled: true,
-      segmentIndex: DEFAULT_CABLE_PASS_SEGMENT_INDEX,
-      distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-      overlapMm: DEFAULT_CABLE_PASS_OVERLAP_MM,
-    },
+    cablePasses: [makeDefaultCablePass()],
   },
+  markPoints: [],
 };

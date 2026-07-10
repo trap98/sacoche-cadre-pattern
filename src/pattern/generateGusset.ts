@@ -5,8 +5,10 @@ import type {
   PatternParameters,
   PatternPiece,
   Point,
+  SegmentPointMark,
   ValidatedBagShape,
 } from './types';
+import { resolveCablePasses } from './defaults';
 import { applyApproximateSeamAllowance, boundingBox, polygonPerimeter, rectangle, segmentLength } from './geometry';
 
 type GussetSection = {
@@ -65,6 +67,35 @@ function segmentMarkAnnotations(
   ]);
 }
 
+function pointMarkAnnotations(
+  xPositions: number[],
+  depth: number,
+  seamAllowanceMm: number,
+): PatternAnnotation[] {
+  // Filled triangle pointing into the piece from each cut edge, base on the edge
+  const markDepth = Math.min(5, seamAllowanceMm);
+  const halfWidth = markDepth * 0.7;
+
+  return xPositions.flatMap((x) => [
+    {
+      type: 'point-mark' as const,
+      points: [
+        { x: x - halfWidth, y: -seamAllowanceMm },
+        { x: x + halfWidth, y: -seamAllowanceMm },
+        { x, y: -seamAllowanceMm + markDepth },
+      ],
+    },
+    {
+      type: 'point-mark' as const,
+      points: [
+        { x: x - halfWidth, y: depth + seamAllowanceMm },
+        { x: x + halfWidth, y: depth + seamAllowanceMm },
+        { x, y: depth + seamAllowanceMm - markDepth },
+      ],
+    },
+  ]);
+}
+
 function makeGussetPiece(
   id: string,
   label: string,
@@ -74,6 +105,7 @@ function makeGussetPiece(
   extraAnnotations: PatternAnnotation[] = [],
   seamlessEdges: SeamlessEdge[] = [],
   segmentBreakXPositions: number[] = [],
+  pointMarkXPositions: number[] = [],
 ): PatternPiece {
   const referencePath = rectangle(length, depth);
   const path =
@@ -104,6 +136,7 @@ function makeGussetPiece(
         ],
       },
       ...segmentMarkAnnotations(segmentBreakXPositions, depth, seamAllowanceMm),
+      ...pointMarkAnnotations(pointMarkXPositions, depth, seamAllowanceMm),
       ...extraAnnotations,
     ],
   };
@@ -256,6 +289,35 @@ function internalSegmentBreakPositions(points: Point[], section: GussetSection):
   return positions;
 }
 
+function markPointPositionsInSection(
+  points: Point[],
+  section: GussetSection,
+  markPoints: SegmentPointMark[],
+): number[] {
+  const segmentCount = points.length;
+
+  return markPoints
+    .filter(
+      (mark) =>
+        Number.isFinite(mark.distanceFromStartMm) &&
+        Number.isInteger(mark.segmentIndex) &&
+        mark.segmentIndex >= 0 &&
+        mark.segmentIndex < segmentCount &&
+        sectionContainsSegment(section, mark.segmentIndex, segmentCount),
+    )
+    .map((mark) => {
+      const length = segmentLength(
+        points[mark.segmentIndex],
+        points[(mark.segmentIndex + 1) % segmentCount],
+      );
+
+      return (
+        distanceFromSectionStartToSegment(points, section, mark.segmentIndex) +
+        clamp(mark.distanceFromStartMm, 0, length)
+      );
+    });
+}
+
 function makeGussetPiecesForSection(
   section: GussetSection,
   index: number,
@@ -270,20 +332,28 @@ function makeGussetPiecesForSection(
     (section.segmentCount === 1
       ? `Soufflet ${segmentLabel(section.startSegmentIndex)}`
       : `Soufflet section ${index + 1}`);
-  const cablePass = parameters.gusset.cablePass;
   const segmentCount = points.length;
-  const cableSegmentIndex =
-    cablePass && segmentCount > 0
-      ? Math.trunc(clamp(cablePass.segmentIndex, 0, segmentCount - 1))
-      : -1;
   const breakPositions = internalSegmentBreakPositions(points, section);
+  const markPositions = markPointPositionsInSection(points, section, parameters.markPoints ?? []);
+  const cuts =
+    segmentCount > 0
+      ? resolveCablePasses(parameters.gusset)
+          .filter((cablePass) => cablePass.enabled && cablePass.overlapMm > 0)
+          .map((cablePass) => ({
+            ...cablePass,
+            segmentIndex: Math.trunc(clamp(cablePass.segmentIndex, 0, segmentCount - 1)),
+          }))
+          .filter((cablePass) => sectionContainsSegment(section, cablePass.segmentIndex, segmentCount))
+          .map((cablePass) => ({
+            position:
+              distanceFromSectionStartToSegment(points, section, cablePass.segmentIndex) +
+              cablePassDistanceOnSegment(points, cablePass, cablePass.segmentIndex),
+            overlapMm: cablePass.overlapMm,
+          }))
+          .sort((a, b) => a.position - b.position)
+      : [];
 
-  if (
-    !cablePass?.enabled ||
-    cablePass.overlapMm <= 0 ||
-    cableSegmentIndex < 0 ||
-    !sectionContainsSegment(section, cableSegmentIndex, segmentCount)
-  ) {
+  if (cuts.length === 0) {
     return [
       makeGussetPiece(
         baseId,
@@ -294,43 +364,52 @@ function makeGussetPiecesForSection(
         [],
         [],
         breakPositions,
+        markPositions,
       ),
     ];
   }
 
-  const distanceToSegment = distanceFromSectionStartToSegment(points, section, cableSegmentIndex);
-  const distanceToPass =
-    distanceToSegment + cablePassDistanceOnSegment(points, cablePass, cableSegmentIndex);
-  const beforeLength = distanceToPass + cablePass.overlapMm;
-  const afterLength = section.length - distanceToPass;
   const pieces: PatternPiece[] = [];
 
-  if (beforeLength > 0.001) {
-    pieces.push(
-      makeGussetPiece(
-        `${baseId}-before-cable-pass`,
-        `${baseLabel} - avant passe cable`,
-        beforeLength,
-        parameters.bagDepthMm,
-        parameters.seamAllowanceMm,
-        [],
-        ['right'],
-        breakPositions.filter((x) => x > 0 && x < beforeLength),
-      ),
-    );
-  }
+  for (let pieceIndex = 0; pieceIndex <= cuts.length; pieceIndex += 1) {
+    const start = pieceIndex === 0 ? 0 : cuts[pieceIndex - 1].position;
+    const end =
+      pieceIndex === cuts.length
+        ? section.length
+        : cuts[pieceIndex].position + cuts[pieceIndex].overlapMm;
 
-  if (afterLength > 0.001) {
+    if (end - start <= 0.001) {
+      continue;
+    }
+
+    const idSuffix =
+      cuts.length === 1
+        ? pieceIndex === 0
+          ? 'before-cable-pass'
+          : 'after-cable-pass'
+        : `cable-pass-part-${pieceIndex + 1}`;
+    const labelSuffix =
+      cuts.length === 1
+        ? pieceIndex === 0
+          ? 'avant passe cable'
+          : 'après passe cable'
+        : `partie ${pieceIndex + 1}`;
+    const seamlessEdges: SeamlessEdge[] = [
+      ...(pieceIndex > 0 ? (['left'] as const) : []),
+      ...(pieceIndex < cuts.length ? (['right'] as const) : []),
+    ];
+
     pieces.push(
       makeGussetPiece(
-        `${baseId}-after-cable-pass`,
-        `${baseLabel} - après passe cable`,
-        afterLength,
+        `${baseId}-${idSuffix}`,
+        `${baseLabel} - ${labelSuffix}`,
+        end - start,
         parameters.bagDepthMm,
         parameters.seamAllowanceMm,
         [],
-        ['left'],
-        breakPositions.filter((x) => x > distanceToPass).map((x) => x - distanceToPass),
+        seamlessEdges,
+        breakPositions.filter((x) => x > start && x < end).map((x) => x - start),
+        markPositions.filter((x) => x >= start && x <= end).map((x) => x - start),
       ),
     );
   }

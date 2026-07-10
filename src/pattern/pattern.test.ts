@@ -521,3 +521,124 @@ describe('gusset generation', () => {
     // After piece: segment 2→3 at outline pos 280, mapped to 280-220=60
     expect(xOf(after)).toEqual([60]);
   });
+
+describe('multiple cable passes', () => {
+  it('splits a single-piece gusset once per cable pass', () => {
+    // rectangleShape: L0=100, L1=80, L2=100, L3=80, perimeter=360
+    // Cut A: segment 1 at 40 → position 140; cut B: segment 2 at 40 → position 220
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'single-piece',
+        angleBreakThresholdDeg: 25,
+        cablePasses: [
+          { enabled: true, segmentIndex: 2, distanceFromSegmentStartMm: 40, overlapMm: 10 },
+          { enabled: true, segmentIndex: 1, distanceFromSegmentStartMm: 40, overlapMm: 10 },
+        ],
+      },
+      testParameters({ bagDepthMm: 50 }),
+    );
+
+    expect(pieces).toHaveLength(3);
+    expect(boundingBox(pieces[0].referencePaths![0]).width).toBe(150);
+    expect(boundingBox(pieces[1].referencePaths![0]).width).toBe(90);
+    expect(boundingBox(pieces[2].referencePaths![0]).width).toBe(140);
+  });
+
+  it('keeps legacy single cablePass sessions working', () => {
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'single-piece',
+        angleBreakThresholdDeg: 25,
+        cablePass: { enabled: true, segmentIndex: 2, distanceFromSegmentStartMm: 40, overlapMm: 10 },
+      },
+      testParameters({ bagDepthMm: 50 }),
+    );
+
+    expect(pieces).toHaveLength(2);
+    expect(pieces[0].id).toContain('before-cable-pass');
+    expect(pieces[1].id).toContain('after-cable-pass');
+  });
+});
+
+describe('segment point marks', () => {
+  it('places point marks along a single-piece gusset', () => {
+    // Mark on segment 2 at 30mm → section position 100+80+30 = 210
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      { splitMode: 'single-piece', angleBreakThresholdDeg: 25 },
+      testParameters({
+        bagDepthMm: 50,
+        seamAllowanceMm: 10,
+        markPoints: [{ id: 'mark-1', segmentIndex: 2, distanceFromStartMm: 30 }],
+      }),
+    );
+
+    const marks = pieces[0].annotations.filter((a) => a.type === 'point-mark');
+    const topMarks = marks.filter((m) => m.points[0].y < 0);
+
+    expect(topMarks).toHaveLength(1);
+    // Triangle: [baseLeft, baseRight, apex] — the apex sits at the mark position
+    expect(topMarks[0].points).toHaveLength(3);
+    expect(topMarks[0].points[2].x).toBe(210);
+    expect(topMarks[0].points[0].y).toBe(-10);
+  });
+
+  it('maps point marks onto the pieces produced by a cable pass split', () => {
+    // Cable pass on segment 2 at 40 → cut at 220, overlap 10
+    // Mark at 210 → before piece [0,230]; mark at 280 (segment 3 start) → after piece at 60
+    const pieces = generateGussetPieces(
+      rectangleShape,
+      {
+        splitMode: 'single-piece',
+        angleBreakThresholdDeg: 25,
+        cablePasses: [
+          { enabled: true, segmentIndex: 2, distanceFromSegmentStartMm: 40, overlapMm: 10 },
+        ],
+      },
+      testParameters({
+        bagDepthMm: 50,
+        seamAllowanceMm: 10,
+        markPoints: [
+          { id: 'mark-1', segmentIndex: 2, distanceFromStartMm: 30 },
+          { id: 'mark-2', segmentIndex: 3, distanceFromStartMm: 0 },
+        ],
+      }),
+    );
+
+    const before = pieces.find((p) => p.id.includes('before'));
+    const after = pieces.find((p) => p.id.includes('after'));
+    const xOf = (piece: typeof before) =>
+      piece!.annotations
+        .filter((a) => a.type === 'point-mark' && a.points[0].y < 0)
+        .map((a) => a.points[2].x)
+        .sort((a, b) => a - b);
+
+    expect(xOf(before)).toEqual([210]);
+    expect(xOf(after)).toEqual([60]);
+  });
+
+  it('reports point marks on face pieces as outward notches', () => {
+    // Mark on segment 1 (right edge of the rectangle) at 30mm from its start (100,0)
+    const pieces = generateFacePieces(
+      'B',
+      rectangleShape,
+      faceWithZips(),
+      testParameters({
+        seamAllowanceMm: 10,
+        markPoints: [{ id: 'mark-1', segmentIndex: 1, distanceFromStartMm: 30 }],
+      }),
+    );
+
+    const marks = pieces[0].annotations.filter((a) => a.type === 'point-mark');
+
+    expect(marks).toHaveLength(1);
+    // Triangle base on the seam edge, apex pointing into the piece at the mark position
+    expect(marks[0].points).toHaveLength(3);
+    expect(marks[0].points[0].x).toBeCloseTo(110);
+    expect(marks[0].points[1].x).toBeCloseTo(110);
+    expect(marks[0].points[2].x).toBeCloseTo(105);
+    expect(marks[0].points[2].y).toBeCloseTo(30);
+  });
+});

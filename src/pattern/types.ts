@@ -22,6 +22,7 @@ export type PatternParameters = {
   faceA: FaceOptions;
   faceB: FaceOptions;
   gusset: GussetOptions;
+  markPoints?: SegmentPointMark[];
 };
 
 export type FaceOptions = {
@@ -39,7 +40,9 @@ export type GussetOptions = {
   splitMode: 'single-piece' | 'one-piece-per-tube' | 'manual';
   angleBreakThresholdDeg: number;
   manualBreakSegmentIndices?: number[];
+  // Legacy single cable pass, migrated to cablePasses on load
   cablePass?: CablePassOptions;
+  cablePasses?: CablePassOptions[];
 };
 
 export type CablePassOptions = {
@@ -48,6 +51,12 @@ export type CablePassOptions = {
   distanceFromTopMm?: number;
   distanceFromSegmentStartMm?: number;
   overlapMm: number;
+};
+
+export type SegmentPointMark = {
+  id: string;
+  segmentIndex: number;
+  distanceFromStartMm: number;
 };
 
 export type PatternPiece = {
@@ -68,7 +77,7 @@ export type PatternPiece = {
 };
 
 export type PatternAnnotation = {
-  type: 'label' | 'fold-line' | 'stitch-line' | 'zip-line' | 'grain-line' | 'segment-mark' | 'split-mark';
+  type: 'label' | 'fold-line' | 'stitch-line' | 'zip-line' | 'grain-line' | 'segment-mark' | 'split-mark' | 'point-mark';
   label?: string;
   points: Point[];
   fontSizeMm?: number;

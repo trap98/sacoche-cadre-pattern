@@ -1,13 +1,13 @@
-import { ArrowLeft, CircleHelp, Download, Image, Move, RotateCcw, Scissors, Settings2, ZoomIn } from 'lucide-react';
+import { ArrowLeft, CircleHelp, CirclePlus, Download, Image, Move, RotateCcw, Scissors, Settings2, Trash2, ZoomIn } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, PointerEvent } from 'react';
-import { DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM } from './defaults';
+import { DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM, makeDefaultCablePass, resolveCablePasses } from './defaults';
 import { generatePattern } from './generatePattern';
 import { boundingBox, segmentLength, signedPolygonArea } from './geometry';
 import { layoutPieces } from './layoutPieces';
 import { ensureZipperCount, updateNumber, zipperBottomClearanceValue } from './zipperOptions';
-import type { FaceOptions, PatternAnnotation, PatternParameters, Point, ValidatedBagShape } from './types';
-import { downloadSvgSnapshotAsPng } from '../App';
+import type { CablePassOptions, FaceOptions, PatternAnnotation, PatternParameters, Point, SegmentPointMark, ValidatedBagShape } from './types';
+import { downloadSvgSnapshot } from '../App';
 
 type PatternWorkspaceProps = {
   shape: ValidatedBagShape;
@@ -210,6 +210,12 @@ function buildExportSvg(
             )}" fill="none" stroke="#c0392b" stroke-width="${toExportUnit(0.45)}" />`;
           }
 
+          if (annotation.type === 'point-mark') {
+            return `<polygon points="${pathPointsForExport(
+              annotation.points,
+            )}" fill="#2563eb" stroke="none" />`;
+          }
+
           return `<polyline points="${pathPointsForExport(
             annotation.points,
           )}" fill="none" stroke="#4b535f" stroke-width="${toExportUnit(
@@ -257,21 +263,26 @@ export function PatternWorkspace({
   const shapeBounds = useMemo(() => boundingBox(shape.outline), [shape.outline]);
   const pieces = useMemo(() => generatePattern(shape, parameters), [shape, parameters]);
   const layout = useMemo(() => layoutPieces(pieces), [pieces]);
-  const cablePassSegmentIndex = parameters.gusset.cablePass?.segmentIndex ?? 2;
-  const cablePassSegmentLengthMm = useMemo(() => {
-    if (
-      shape.outline.length < 2 ||
-      cablePassSegmentIndex < 0 ||
-      cablePassSegmentIndex >= shape.outline.length
-    ) {
-      return 0;
-    }
+  const cablePasses = resolveCablePasses(parameters.gusset);
+  const markPoints = parameters.markPoints ?? [];
 
-    return segmentLength(
-      shape.outline[cablePassSegmentIndex],
-      shape.outline[(cablePassSegmentIndex + 1) % shape.outline.length],
-    );
-  }, [cablePassSegmentIndex, shape.outline]);
+  const outlineSegmentLengthMm = useCallback(
+    (segmentIndex: number): number => {
+      if (
+        shape.outline.length < 2 ||
+        segmentIndex < 0 ||
+        segmentIndex >= shape.outline.length
+      ) {
+        return 0;
+      }
+
+      return segmentLength(
+        shape.outline[segmentIndex],
+        shape.outline[(segmentIndex + 1) % shape.outline.length],
+      );
+    },
+    [shape.outline],
+  );
 
   const clientToPatternPoint = useCallback((event: { clientX: number; clientY: number }): Point => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -383,20 +394,36 @@ export function PatternWorkspace({
     });
   }
 
-  function updateCablePass(patch: Partial<NonNullable<PatternParameters['gusset']['cablePass']>>) {
-    const currentCablePass = parameters.gusset.cablePass ?? {
-      enabled: false,
-      segmentIndex: 2,
-      distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-      overlapMm: 10,
-    };
+  function setCablePasses(next: CablePassOptions[]) {
+    updateGusset({ cablePass: undefined, cablePasses: next });
+  }
 
-    updateGusset({
-      cablePass: {
-        ...currentCablePass,
-        ...patch,
-      },
+  function updateCablePassAt(index: number, patch: Partial<CablePassOptions>) {
+    setCablePasses(
+      cablePasses.map((cablePass, cablePassIndex) =>
+        cablePassIndex === index ? { ...cablePass, ...patch } : cablePass,
+      ),
+    );
+  }
+
+  function addCablePass() {
+    setCablePasses([...cablePasses, makeDefaultCablePass()]);
+  }
+
+  function removeCablePass(index: number) {
+    setCablePasses(cablePasses.filter((_, cablePassIndex) => cablePassIndex !== index));
+  }
+
+  function updateMarkPointAt(index: number, patch: Partial<SegmentPointMark>) {
+    updateParameters({
+      markPoints: markPoints.map((mark, markIndex) =>
+        markIndex === index ? { ...mark, ...patch } : mark,
+      ),
     });
+  }
+
+  function removeMarkPoint(index: number) {
+    updateParameters({ markPoints: markPoints.filter((_, markIndex) => markIndex !== index) });
   }
 
   function handleFaceZipCount(faceKey: 'faceA' | 'faceB', event: ChangeEvent<HTMLSelectElement>) {
@@ -491,6 +518,16 @@ export function PatternWorkspace({
       );
     }
 
+    if (annotation.type === 'point-mark') {
+      return (
+        <polygon
+          className={annotationClass(annotation)}
+          key={`${pieceId}-annotation-${index}`}
+          points={pathPoints(annotation.points)}
+        />
+      );
+    }
+
     return (
       <polyline
         className={annotationClass(annotation)}
@@ -555,10 +592,10 @@ export function PatternWorkspace({
             <button
               className="secondary-button"
               type="button"
-              onClick={() => downloadSvgSnapshotAsPng(canvasSvgSnapshot)}
+              onClick={() => downloadSvgSnapshot(canvasSvgSnapshot)}
             >
               <Image size={17} />
-              Exporter vue finale PNG
+              Exporter vue finale SVG
             </button>
           ) : null}
           <button className="secondary-button" type="button" onClick={resetPatternView}>
@@ -688,81 +725,79 @@ export function PatternWorkspace({
 
         <section className="tool-section">
           <div className="section-title">Soufflet</div>
-          {(() => {
-            const cablePass = parameters.gusset.cablePass ?? {
-              enabled: false,
-              segmentIndex: 2,
-              distanceFromTopMm: DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM,
-              overlapMm: 10,
-            };
+          {cablePasses.map((cablePass, index) => {
             const distanceFromTopMm =
               cablePass.distanceFromTopMm ??
               cablePass.distanceFromSegmentStartMm ??
               DEFAULT_CABLE_PASS_DISTANCE_FROM_TOP_MM;
+            const segmentLengthMm = outlineSegmentLengthMm(cablePass.segmentIndex);
 
             return (
-              <>
-                <label className="checkbox-field">
+              <div className="list-item" key={`cable-pass-${index}`}>
+                <div className="metric-row">
+                  <span>Passe cable {index + 1}</span>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={() => removeCablePass(index)}
+                    title="Supprimer ce passe cable"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                <label className="field">
+                  <FieldLabel help="Segment du tracé qui porte ce passe cable. La valeur est basée sur l'ordre des points, en commençant à 1.">
+                    Segment passe cable
+                  </FieldLabel>
                   <input
-                    type="checkbox"
-                    checked={cablePass.enabled}
-                    onChange={(event) => updateCablePass({ enabled: event.target.checked })}
+                    type="number"
+                    min="1"
+                    max={shape.outline.length}
+                    step="1"
+                    value={cablePass.segmentIndex + 1}
+                    onChange={(event) =>
+                      updateCablePassAt(index, {
+                        segmentIndex: Math.max(0, updateNumber(event.target.value) - 1),
+                      })
+                    }
                   />
-                  <span>Passe cable down tube</span>
                 </label>
-                {cablePass.enabled ? (
-                  <>
-                    <label className="field">
-                      <FieldLabel help="Segment du tracé qui correspond au down tube. La valeur est basée sur l'ordre des points, en commençant à 1.">
-                        Segment passe cable
-                      </FieldLabel>
-                      <input
-                        type="number"
-                        min="1"
-                        max={shape.outline.length}
-                        step="1"
-                        value={cablePass.segmentIndex + 1}
-                        onChange={(event) =>
-                          updateCablePass({
-                            segmentIndex: Math.max(0, updateNumber(event.target.value) - 1),
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <FieldLabel help="Position de la découpe du passe-cable mesurée depuis le point le plus haut du segment down tube sélectionné.">
-                        Distance depuis haut du segment
-                      </FieldLabel>
-                      <input
-                        type="number"
-                        min="0"
-                        max={Math.max(0, Math.round(cablePassSegmentLengthMm * 10) / 10)}
-                        step="1"
-                        value={Math.round(distanceFromTopMm * 10) / 10}
-                        onChange={(event) =>
-                          updateCablePass({ distanceFromTopMm: updateNumber(event.target.value) })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <FieldLabel help="Longueur de recouvrement entre les deux parties du soufflet au niveau du passe-cable.">
-                        Chevauchement passe cable
-                      </FieldLabel>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={cablePass.overlapMm}
-                        onChange={(event) =>
-                          updateCablePass({ overlapMm: updateNumber(event.target.value) })
-                        }
-                      />
-                    </label>
-                  </>
-                ) : null}
-              </>
+                <label className="field">
+                  <FieldLabel help="Position de la découpe du passe-cable mesurée depuis le point le plus haut du segment sélectionné.">
+                    Distance depuis haut du segment
+                  </FieldLabel>
+                  <input
+                    type="number"
+                    min="0"
+                    max={Math.max(0, Math.round(segmentLengthMm * 10) / 10)}
+                    step="1"
+                    value={Math.round(distanceFromTopMm * 10) / 10}
+                    onChange={(event) =>
+                      updateCablePassAt(index, { distanceFromTopMm: updateNumber(event.target.value) })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <FieldLabel help="Longueur de recouvrement entre les deux parties du soufflet au niveau du passe-cable.">
+                    Chevauchement passe cable
+                  </FieldLabel>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={cablePass.overlapMm}
+                    onChange={(event) =>
+                      updateCablePassAt(index, { overlapMm: updateNumber(event.target.value) })
+                    }
+                  />
+                </label>
+              </div>
             );
-          })()}
+          })}
+          <button className="secondary-button" type="button" onClick={addCablePass}>
+            <CirclePlus size={17} />
+            Ajouter un passe cable
+          </button>
           <label className="field">
             <FieldLabel help="Une pièce utilise le périmètre complet. Une pièce par tube crée une bande par segment du tracé validé.">
               Découpe
@@ -805,6 +840,63 @@ export function PatternWorkspace({
               <strong>{parameters.gusset.manualBreakSegmentIndices?.length ?? 0}</strong>
             </div>
           ) : null}
+        </section>
+
+        <section className="tool-section">
+          <div className="section-title">Repères</div>
+          {markPoints.length === 0 ? (
+            <p className="empty-state">
+              Aucun repère. Placez-les à l'étape passe cable en cliquant sur les segments du tracé.
+            </p>
+          ) : (
+            markPoints.map((mark, index) => (
+              <div className="list-item" key={mark.id}>
+                <div className="metric-row">
+                  <span>Repère {index + 1}</span>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={() => removeMarkPoint(index)}
+                    title="Supprimer ce repère"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                <label className="field">
+                  <FieldLabel help="Segment du tracé qui porte ce repère. La valeur est basée sur l'ordre des points, en commençant à 1.">
+                    Segment repère
+                  </FieldLabel>
+                  <input
+                    type="number"
+                    min="1"
+                    max={shape.outline.length}
+                    step="1"
+                    value={mark.segmentIndex + 1}
+                    onChange={(event) =>
+                      updateMarkPointAt(index, {
+                        segmentIndex: Math.max(0, updateNumber(event.target.value) - 1),
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <FieldLabel help="Position du repère mesurée le long du segment depuis son point de départ dans l'ordre du tracé.">
+                    Distance depuis début segment
+                  </FieldLabel>
+                  <input
+                    type="number"
+                    min="0"
+                    max={Math.max(0, Math.round(outlineSegmentLengthMm(mark.segmentIndex) * 10) / 10)}
+                    step="1"
+                    value={Math.round(mark.distanceFromStartMm * 10) / 10}
+                    onChange={(event) =>
+                      updateMarkPointAt(index, { distanceFromStartMm: updateNumber(event.target.value) })
+                    }
+                  />
+                </label>
+              </div>
+            ))
+          )}
         </section>
 
         <div className="status-line">

@@ -672,6 +672,42 @@ button {
   vector-effect: non-scaling-stroke;
 }
 
+.cable-pass-marker.active {
+  stroke-width: 3.5;
+  fill: rgba(124, 58, 237, 0.14);
+}
+
+.point-mark-marker line {
+  stroke: #2563eb;
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.point-mark-marker-hit {
+  fill: transparent;
+  stroke: none;
+  cursor: pointer;
+}
+
+.point-mark-marker:hover line {
+  stroke: #c0392b;
+}
+
+.list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  background: #f0f2f4;
+  border: 1px solid #e1e4e8;
+  border-radius: 7px;
+}
+
+.list-item.active {
+  background: #eef4f2;
+  border-color: #1f6f5b;
+}
+
 .scene-overlay {
   cursor: grab;
 }
@@ -852,6 +888,11 @@ button {
 .pattern-annotation.split-mark {
   stroke: #c0392b;
   stroke-width: 1.8;
+}
+
+.pattern-annotation.point-mark {
+  fill: #2563eb;
+  stroke: none;
 }
 
 @media (max-width: 780px) {

@@ -1,4 +1,4 @@
-import type { FaceOptions, PatternAnnotation, PatternParameters, PatternPiece, Point, ValidatedBagShape } from './types';
+import type { CablePassOptions, FaceOptions, PatternAnnotation, PatternParameters, PatternPiece, Point, ValidatedBagShape } from './types';
 import {
   applyApproximateSeamAllowance,
   boundingBox,
@@ -9,6 +9,7 @@ import {
   rectangle,
 } from './geometry';
 import { gussetPieceBoundaryVertexIndices } from './generateGusset';
+import { resolveCablePasses } from './defaults';
 
 type FaceName = 'A' | 'B';
 
@@ -191,19 +192,21 @@ function faceSegmentMarkAnnotations(
   return annotations;
 }
 
-function cablePassMarkAnnotation(
+function outlinePointMarkAnnotation(
   clipped: Point[],
   outline: Point[],
-  cablePass: { enabled: boolean; segmentIndex: number; distanceFromTopMm?: number; distanceFromSegmentStartMm?: number; overlapMm: number },
+  segmentIndex: number,
+  distanceFromStartMm: number,
   sectionMinY: number,
   sectionMaxY: number,
   seamAllowanceMm: number,
   tickLength: number,
+  type: 'split-mark' | 'point-mark',
 ): PatternAnnotation | null {
-  if (!cablePass.enabled || cablePass.overlapMm <= 0 || outline.length === 0) return null;
+  if (outline.length === 0 || !Number.isFinite(distanceFromStartMm)) return null;
 
   const n = outline.length;
-  const segIndex = Math.min(Math.max(Math.trunc(cablePass.segmentIndex), 0), n - 1);
+  const segIndex = Math.min(Math.max(Math.trunc(segmentIndex), 0), n - 1);
   const segStart = outline[segIndex];
   const segEnd = outline[(segIndex + 1) % n];
   const edgeDx = segEnd.x - segStart.x;
@@ -212,16 +215,7 @@ function cablePassMarkAnnotation(
 
   if (segLen < 0.001) return null;
 
-  let distFromStart: number;
-
-  if (cablePass.distanceFromTopMm !== undefined && Number.isFinite(cablePass.distanceFromTopMm)) {
-    const segStartIsTop = segStart.y <= segEnd.y;
-    const d = Math.min(Math.max(cablePass.distanceFromTopMm, 0), segLen);
-    distFromStart = segStartIsTop ? d : segLen - d;
-  } else {
-    distFromStart = Math.min(Math.max(cablePass.distanceFromSegmentStartMm ?? segLen / 2, 0), segLen);
-  }
-
+  const distFromStart = Math.min(Math.max(distanceFromStartMm, 0), segLen);
   const t = distFromStart / segLen;
   const refPoint: Point = {
     x: segStart.x + t * (segEnd.x - segStart.x),
@@ -241,13 +235,54 @@ function cablePassMarkAnnotation(
   const outX = toCentroidDot > 0 ? -n1x : n1x;
   const outY = toCentroidDot > 0 ? -n1y : n1y;
 
+  if (type === 'point-mark') {
+    // Filled triangle: base on the cut edge, apex pointing into the piece
+    const halfWidth = tickLength * 0.7;
+    const alongX = edgeDx / segLen;
+    const alongY = edgeDy / segLen;
+    const baseX = refPoint.x + outX * seamAllowanceMm;
+    const baseY = refPoint.y + outY * seamAllowanceMm;
+
+    return {
+      type,
+      points: [
+        { x: baseX - alongX * halfWidth, y: baseY - alongY * halfWidth },
+        { x: baseX + alongX * halfWidth, y: baseY + alongY * halfWidth },
+        {
+          x: refPoint.x + outX * (seamAllowanceMm - tickLength),
+          y: refPoint.y + outY * (seamAllowanceMm - tickLength),
+        },
+      ],
+    };
+  }
+
   return {
-    type: 'split-mark',
+    type,
     points: [
       { x: refPoint.x + outX * seamAllowanceMm, y: refPoint.y + outY * seamAllowanceMm },
       { x: refPoint.x + outX * (seamAllowanceMm - tickLength), y: refPoint.y + outY * (seamAllowanceMm - tickLength) },
     ],
   };
+}
+
+function cablePassDistanceFromSegmentStart(
+  outline: Point[],
+  cablePass: CablePassOptions,
+): number {
+  const n = outline.length;
+  const segIndex = Math.min(Math.max(Math.trunc(cablePass.segmentIndex), 0), n - 1);
+  const segStart = outline[segIndex];
+  const segEnd = outline[(segIndex + 1) % n];
+  const segLen = Math.hypot(segEnd.x - segStart.x, segEnd.y - segStart.y);
+
+  if (cablePass.distanceFromTopMm !== undefined && Number.isFinite(cablePass.distanceFromTopMm)) {
+    const segStartIsTop = segStart.y <= segEnd.y;
+    const d = Math.min(Math.max(cablePass.distanceFromTopMm, 0), segLen);
+
+    return segStartIsTop ? d : segLen - d;
+  }
+
+  return Math.min(Math.max(cablePass.distanceFromSegmentStartMm ?? segLen / 2, 0), segLen);
 }
 
 function makeLabelAnnotation(label: string, path: Point[], seamAllowanceMm: number) {
@@ -430,10 +465,37 @@ export function generateFacePieces(
     );
     const tickLength = Math.min(5, parameters.seamAllowanceMm);
     const segmentMarks = faceSegmentMarkAnnotations(clipped, path, outline, outlineSeamPath, splitVertexIndices, tickLength);
-    const cablePass = parameters.gusset.cablePass;
-    const cablePassMark = cablePass
-      ? cablePassMarkAnnotation(clipped, outline, cablePass, section.minY, section.maxY, parameters.seamAllowanceMm, tickLength)
-      : null;
+    const cablePassMarks = resolveCablePasses(parameters.gusset)
+      .filter((cablePass) => cablePass.enabled && cablePass.overlapMm > 0)
+      .map((cablePass) =>
+        outlinePointMarkAnnotation(
+          clipped,
+          outline,
+          cablePass.segmentIndex,
+          cablePassDistanceFromSegmentStart(outline, cablePass),
+          section.minY,
+          section.maxY,
+          parameters.seamAllowanceMm,
+          tickLength,
+          'split-mark',
+        ),
+      )
+      .filter((annotation): annotation is PatternAnnotation => annotation !== null);
+    const pointMarks = (parameters.markPoints ?? [])
+      .map((mark) =>
+        outlinePointMarkAnnotation(
+          clipped,
+          outline,
+          mark.segmentIndex,
+          mark.distanceFromStartMm,
+          section.minY,
+          section.maxY,
+          parameters.seamAllowanceMm,
+          tickLength,
+          'point-mark',
+        ),
+      )
+      .filter((annotation): annotation is PatternAnnotation => annotation !== null);
 
     pieces.push({
       id: section.id,
@@ -444,7 +506,8 @@ export function generateFacePieces(
       annotations: [
         makeLabelAnnotation(section.label, path, parameters.seamAllowanceMm),
         ...segmentMarks,
-        ...(cablePassMark ? [cablePassMark] : []),
+        ...cablePassMarks,
+        ...pointMarks,
       ],
     });
   });
